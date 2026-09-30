@@ -56,12 +56,39 @@ try {
   const registered = []
   let created
   const jobs = { start: (spec) => { started.push(spec); return 'pwsh-probe' } }
+  // The tools surface, with the TWO methods the plugin now uses. `register` installs the
+  // tool; `get(name, scope)` is the registry's own view API
+  // (`dsh-tools/lib/types/index.js:615`) and it is what the OWNERSHIP PREDICATE reads on the
+  // root's ctx. The three collection tools are answered for, because this probe models a
+  // deployment where `dsh-tool-jobs` mounted — without them the tool is withheld by design
+  // and the probe would be measuring the refusal instead of the install.
+  const collection = new Set(['job_output', 'job_kill', 'job_list'])
+  const tools = {
+    register: (tool) => registered.push(tool),
+    get: (name) => (collection.has(name) ? { name } : undefined),
+  }
+  /** One agent's own scope: the tools service is reachable only through the documented paths. */
+  const agentCtx = () => makeContext({
+    get: (name) => (name === 'tools' ? tools : undefined),
+    inject: (deps, cb) => {
+      if (deps.includes('tools')) cb(makeContext({ tools }))
+      return () => {}
+    },
+  })
+  // The live registry: BOTH agents, because the predicate asks it for the ROOT, and a root
+  // that is absent is refused (fail-closed) rather than assumed collectable.
+  const live = [{ session: { id: 'session-root' }, ctx: agentCtx() }]
   const ctx = makeContext({
     jobs,
     on: (event, handler) => { if (event === 'agent/created') created = handler },
     inject: (deps, cb) => {
       const child = {}
-      if (deps.includes('agents')) child.agents = { list: () => [] }
+      if (deps.includes('agents')) {
+        child.agents = {
+          list: () => [...live],
+          get: (id) => live.find((entry) => entry.session?.id === id),
+        }
+      }
       if (deps.includes('commands')) child.commands = { register: () => {} }
       cb(makeContext(child))
       return () => {}
@@ -70,15 +97,7 @@ try {
   mod.apply(ctx, undefined)
   console.log('apply    : returned normally')
 
-  const agent = {
-    session: { id: 'session-child' },
-    ctx: makeContext({
-      inject: (deps, cb) => {
-        if (deps.includes('tools')) cb(makeContext({ tools: { register: (t) => registered.push(t) } }))
-        return () => {}
-      },
-    }),
-  }
+  const agent = { session: { id: 'session-child' }, ctx: agentCtx() }
   if (typeof created !== 'function') failures.push('no agent/created listener was registered')
   else created({ agent, source: 'spawn' })
 

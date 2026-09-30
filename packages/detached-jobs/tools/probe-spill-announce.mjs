@@ -81,7 +81,14 @@ try {
     get: (id) => (id === ROOT_SESSION ? agent : undefined),
     list: () => (agent === undefined ? [] : [agent]),
   }
-  const tools = { register: (tool) => { registered.push(tool) } }
+  // `register` installs the tool; `get(name, scope)` is the registry's view API the
+  // OWNERSHIP PREDICATE reads on the root's ctx. This probe attaches a controller to the REAL
+  // registry just below, so the owner genuinely can collect — the three names are answered for.
+  const collection = new Set(['job_output', 'job_kill', 'job_list'])
+  const tools = {
+    register: (tool) => { registered.push(tool) },
+    get: (name) => (collection.has(name) ? { name } : undefined),
+  }
 
   // The two capabilities the harness composes around the registry — the agent registry
   // (ownership resolution) and the tools service (the per-agent surface). Both are REAL

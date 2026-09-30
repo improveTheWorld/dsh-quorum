@@ -88,6 +88,20 @@ function makeContext(services) {
 }
 
 /**
+ * The agent registry as a composition provides it: `list()` for the mount, and `get(id)`
+ * for the live lookup the ownership predicate makes. Modelled after
+ * `dsh-agent/lib/index.js:594-614`, where `get` answers only for a LIVE agent — which is
+ * why a fixture that wants "the root is not here" simply leaves it out of `live`.
+ * @param live - the agents currently registered.
+ */
+function makeAgents(live = []) {
+  return {
+    list: () => [...live],
+    get: (id) => live.find((agent) => agent?.session?.id === id),
+  }
+}
+
+/**
  * A context as the loader hands one to `apply`.
  * @param options.jobs - `null` means "this scope has no jobs service".
  * @param options.onThrows - makes the mount fail at its first subscription.
@@ -95,6 +109,7 @@ function makeContext(services) {
  * @param options.shell - the shell service, when the deployment has a shell row.
  */
 function makeCtx(options = {}) {
+  const agents = makeAgents(options.existingAgents ?? [])
   const state = { started: [], registered: [], commands: [], injected: [], events: [], created: undefined }
   const jobs = options.jobs === null
     ? undefined
@@ -114,7 +129,7 @@ function makeCtx(options = {}) {
       // cordis does not produce.
       if (deps.includes('shell') && options.shell === undefined) return () => {}
       const child = {}
-      if (deps.includes('agents')) child.agents = { list: () => options.existingAgents ?? [] }
+      if (deps.includes('agents')) child.agents = agents
       if (deps.includes('commands')) child.commands = { register: (command) => state.commands.push(command) }
       if (deps.includes('tools')) child.tools = { register: (tool) => state.registered.push(tool) }
       if (deps.includes('jobs') && jobs !== undefined) child.jobs = jobs
@@ -131,14 +146,33 @@ function makeCtx(options = {}) {
   return { ctx: makeContext(services), state }
 }
 
-/** One Agent whose own scope provides the tools service, and nothing else. */
-function makeAgent(sessionId, registered) {
+/**
+ * One Agent whose own scope provides the tools service, and nothing else.
+ *
+ * The ownership predicate reads the ROOT's surface through `ctx.get('tools')` and
+ * `tools.get(name, scope)` (the registry's own view API, `dsh-tools/lib/types/index.js:615`),
+ * so each fixture declares which names ITS surface resolves. `knows` is held by reference
+ * on purpose: a case can withdraw a name and watch the verdict follow.
+ *
+ * @param sessionId - this agent's session id.
+ * @param registered - receives the tools registered into this agent's surface.
+ * @param options.knows - the tool names this agent's surface can resolve.
+ * @param options.withoutToolsService - the agent has a ctx, but no tools service reaches it.
+ */
+function makeAgent(sessionId, registered, options = {}) {
+  const service = {
+    register: (tool) => registered.push(tool),
+    // The real per-scope view is a function of the SCOPE too; a fixture only has to answer
+    // whether this surface knows the name it is asked about.
+    get: (name) => (options.knows?.has(name) === true ? { name } : undefined),
+  }
   return {
     session: { id: sessionId },
     ctx: makeContext({
+      get: (name) => (name === 'tools' && options.withoutToolsService !== true ? service : undefined),
       inject: (deps, cb) => {
-        if (!deps.includes('tools')) return () => {}
-        cb(makeContext({ tools: { register: (tool) => registered.push(tool) } }))
+        if (!deps.includes('tools') || options.withoutToolsService === true) return () => {}
+        cb(makeContext({ tools: service }))
         return () => {}
       },
     }),
@@ -155,12 +189,29 @@ const homeD = mkdtempSync(join(tmpdir(), 'dsh-detached-d-'))
 // could not be told apart anyway.
 const homeE = mkdtempSync(join(tmpdir(), 'dsh-detached-e-'))
 const homeF = mkdtempSync(join(tmpdir(), 'dsh-detached-f-'))
-for (const home of [homeA, homeB, homeE, homeF]) {
+// Every scenario that registers the tool needs a durable root to resolve — including C,
+// whose subject is the journal: without the store the predicate refuses before it can write.
+for (const home of [homeA, homeB, homeC, homeE, homeF]) {
   seedSessions(home, [
     { id: 'session-root' },
     { id: 'session-child', parentSession: 'session-root' },
   ])
 }
+// T1..T4: the OWNERSHIP PREDICATE. Four independent module instances, because each one
+// needs a different root surface and the predicate is read once per agent at registration.
+const homeG = mkdtempSync(join(tmpdir(), 'dsh-detached-g-'))
+const homeH = mkdtempSync(join(tmpdir(), 'dsh-detached-h-'))
+const homeI = mkdtempSync(join(tmpdir(), 'dsh-detached-i-'))
+const homeJ = mkdtempSync(join(tmpdir(), 'dsh-detached-j-'))
+for (const home of [homeG, homeH, homeI, homeJ]) {
+  seedSessions(home, [
+    { id: 'session-root' },
+    { id: 'session-child', parentSession: 'session-root' },
+    // A second child of the same root: T3 needs two workers whose own surfaces differ.
+    { id: 'session-sibling', parentSession: 'session-root' },
+  ])
+}
+
 // Scenario C: the journal path exists and is NOT writable, because it is a directory.
 mkdirSync(join(homeC, 'plugin-data', 'dsh-boost-relay', 'decisions.jsonl'), { recursive: true })
 
@@ -176,9 +227,19 @@ process.env.DSH_HOME = homeE
 const E = await import('../lib/index.js?scenario=shell-service')
 process.env.DSH_HOME = homeF
 const F = await import('../lib/index.js?scenario=no-shell-service')
+process.env.DSH_HOME = homeG
+const G = await import('../lib/index.js?scenario=t1-owner-can-collect')
+process.env.DSH_HOME = homeH
+const H = await import('../lib/index.js?scenario=t2-owner-cannot-collect')
+process.env.DSH_HOME = homeI
+const I = await import('../lib/index.js?scenario=t3-owner-decides')
+process.env.DSH_HOME = homeJ
+const J = await import('../lib/index.js?scenario=t4-owner-unfindable')
 
 test.after(() => {
-  for (const home of [homeA, homeB, homeC, homeD, homeE, homeF]) rmSync(home, { recursive: true, force: true })
+  for (const home of [homeA, homeB, homeC, homeD, homeE, homeF, homeG, homeH, homeI, homeJ]) {
+    rmSync(home, { recursive: true, force: true })
+  }
 })
 
 let primaryMount
@@ -192,10 +253,27 @@ function primary() {
   return primaryMount
 }
 
+let rootOfA
+/**
+ * The ROOT agent of this scenario, announced once.
+ *
+ * It has to be announced for ANY surface to receive the tool: the ownership predicate reads
+ * the root's own surface, so a scenario that never announces a root exercises the
+ * fail-closed branch and nothing else (T4 does exactly that, deliberately).
+ */
+function rootAgent() {
+  if (rootOfA === undefined) {
+    rootOfA = makeAgent('session-root', [], { knows: new Set(['job_kill']) })
+    primary().state.created({ agent: rootOfA, source: 'startup' })
+  }
+  return rootOfA
+}
+
 let toolOfA
 /** `run_detached` as installed into an Agent's surface, through the agent/created envelope. */
 function installedTool() {
   if (toolOfA === undefined) {
+    rootAgent()
     const registered = []
     primary().state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
     toolOfA = registered[0]
@@ -231,9 +309,10 @@ test('the tool is installed into an Agent surface through the agent/created enve
   assert.equal(tool.name, 'run_detached')
   assert.equal(typeof tool.execute, 'function')
   assert.deepEqual(tool.parameters.required, ['command'])
-  const registered = journalOf(homeA).filter((line) => line.step === 'registered')
+  const registered = journalOf(homeA).filter((line) => line.step === 'registered' && line.id === 'child')
   assert.equal(registered.length, 1)
-  assert.equal(registered[0].id, 'child', 'the short id proves the payload envelope was unwrapped')
+  assert.equal(registered[0].root, 'root', 'the line names the OWNER the verdict was formed for')
+  assert.equal(registered[0].via, 'owner-can-collect')
 })
 
 test('the tool carries the registry output contract, whose absence is a register-failed line', () => {
@@ -318,14 +397,24 @@ test('a second mount neither captures again nor installs the tool a second time'
 
 test('an Agent that already existed at mount time still gets the tool', () => {
   const registered = []
-  const mount = makeCtx({ jobs: null, existingAgents: [makeAgent('session-child', registered)] })
+  const rootRegistered = []
+  const mount = makeCtx({
+    jobs: null,
+    // The root is live at mount time, which is the shape of a resumed session — and it is
+    // the root's surface that admits the tool, so it has to be here.
+    existingAgents: [
+      makeAgent('session-root', rootRegistered, { knows: new Set(['job_kill']) }),
+      makeAgent('session-child', registered),
+    ],
+  })
   B.apply(mount.ctx, undefined)
   assert.equal(registered.length, 1, 'a resumed session must not be left without the tool')
+  assert.equal(rootRegistered.length, 1, 'the root gets its own surface too')
   toolOfB = registered[0]
   assert.equal(toolOfB.name, 'run_detached')
   const ready = journalOf(homeB).filter((line) => line.step === 'agents-ready')
   assert.equal(ready.length, 1)
-  assert.equal(ready[0].count, 1)
+  assert.equal(ready[0].count, 2)
 })
 
 test('the tool refuses when no unscoped jobs service was captured — no silent fallback', async () => {
@@ -350,7 +439,7 @@ test('a mount that throws records apply-failed and does not rethrow', () => {
 test('a journal that cannot be written does not break the mount it observes', () => {
   const journalPath = join(homeC, 'plugin-data', 'dsh-boost-relay', 'decisions.jsonl')
   assert.ok(statSync(journalPath).isDirectory(), 'the fixture must make the journal unwritable')
-  const mount = makeCtx()
+  const mount = makeCtx({ existingAgents: [makeAgent('session-root', [], { knows: new Set(['job_kill']) })] })
   assert.doesNotThrow(() => C.apply(mount.ctx, undefined))
   const registered = []
   mount.state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
@@ -384,7 +473,10 @@ test('the started job carries a pull source that never yields a byte', async () 
 
 test('a configured pwshPath is read from the shell service and journalled', async () => {
   const pwshPath = 'D:\\tools\\pwsh.exe'
-  const mount = makeCtx({ shell: { get pwshPath() { return pwshPath } } })
+  const mount = makeCtx({
+    shell: { get pwshPath() { return pwshPath } },
+    existingAgents: [makeAgent('session-root', [], { knows: new Set(['job_kill']) })],
+  })
   E.apply(mount.ctx, undefined)
   const ready = journalOf(homeE).filter((line) => line.step === 'shell-ready')
   assert.equal(ready.length, 1, 'the deferred shell injection must be answered once')
@@ -408,7 +500,7 @@ test('without a shell service the row still starts jobs, on the explicit fallbac
   // The injection never resolves here, which is what "this composition has no shell row"
   // means for a deferred dependency: there is no `shell-ready` line to read, and the job
   // must still start through `resolveShell()`.
-  const mount = makeCtx()
+  const mount = makeCtx({ existingAgents: [makeAgent('session-root', [], { knows: new Set(['job_kill']) })] })
   assert.doesNotThrow(() => F.apply(mount.ctx, undefined))
   assert.equal(journalOf(homeF).filter((line) => line.step === 'shell-ready').length, 0)
   const registered = []
@@ -420,4 +512,82 @@ test('without a shell service the row still starts jobs, on the explicit fallbac
   )
   assert.equal(mount.state.started.length, 1, 'the fallback must still start the job')
   assert.equal(result.job_id, 'pwsh-test-1')
+})
+
+// ---------------------------------------------------------------------------------------
+// The ownership predicate. Its subject is the ROOT — the session that will still be there
+// when the caller is gone, and the only one that can read the job — so T3 reads it from
+// both directions, and each case has to be able to fail (the falsifications are recorded in
+// the package README: inverting the predicate fails T1/T2/T3, removing the trace fails T2/T4).
+// ---------------------------------------------------------------------------------------
+
+test('T1 - the tool IS registered when the OWNER can collect', () => {
+  const rootRegistered = []
+  const mount = makeCtx({
+    existingAgents: [makeAgent('session-root', rootRegistered, { knows: new Set(['job_kill']) })],
+  })
+  G.apply(mount.ctx, undefined)
+  const registered = []
+  mount.state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
+  assert.equal(registered.length, 1, 'a worker whose root can collect must receive the tool')
+  assert.equal(registered[0].name, 'run_detached')
+  const lines = journalOf(homeG)
+  assert.equal(lines.filter((line) => line.step === 'register-skipped').length, 0)
+  const child = lines.filter((line) => line.step === 'registered' && line.id === 'child')
+  assert.equal(child.length, 1)
+  assert.equal(child[0].root, 'root')
+  assert.equal(child[0].via, 'owner-can-collect')
+})
+
+test('T2 - an owner that cannot collect means NO tool, and the journal says why', () => {
+  const mount = makeCtx({
+    // The root has a tools service; it simply does not know `job_kill`, which is the shape
+    // of a composition where `tool-jobs` never mounted.
+    existingAgents: [makeAgent('session-root', [], { knows: new Set() })],
+  })
+  H.apply(mount.ctx, undefined)
+  const registered = []
+  mount.state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
+  assert.equal(registered.length, 0, 'an owner that cannot collect must not be handed a dead tool')
+  const skipped = journalOf(homeH).filter((line) => line.step === 'register-skipped' && line.id === 'child')
+  assert.equal(skipped.length, 1, 'the withdrawal is journalled, never silent')
+  assert.equal(skipped[0].why, 'owner-cannot-collect')
+  assert.equal(skipped[0].root, 'root')
+})
+
+test("T3 - the verdict follows the OWNER, not the surface being registered", () => {
+  // The root knows `job_kill`; this worker's OWN surface knows nothing at all.
+  const knows = new Set(['job_kill'])
+  const mount = makeCtx({ existingAgents: [makeAgent('session-root', [], { knows })] })
+  I.apply(mount.ctx, undefined)
+  const worker = []
+  mount.state.created({ agent: makeAgent('session-child', worker), source: 'spawn' })
+  assert.equal(worker.length, 1, 'the OWNER having the tool is what admits it, whoever is registering')
+  // The mirror image, which is what makes the line above a measurement: the root loses the
+  // tool, and a worker whose OWN surface HAS it must NOT be registered.
+  knows.clear()
+  const sibling = []
+  mount.state.created({ agent: makeAgent('session-sibling', sibling, { knows: new Set(['job_kill']) }), source: 'spawn' })
+  assert.equal(sibling.length, 0, "the caller's own surface must not decide")
+  const skipped = journalOf(homeI).filter((line) => line.step === 'register-skipped' && line.id === 'sibling')
+  assert.equal(skipped.length, 1)
+  assert.equal(skipped[0].why, 'owner-cannot-collect')
+})
+
+test('T4 - an unfindable owner means NO tool, and the journal names which condition', () => {
+  const mount = makeCtx()
+  J.apply(mount.ctx, undefined)
+  // (a) the caller's session is not in the durable store: no root resolves at all.
+  const ghost = []
+  mount.state.created({ agent: makeAgent('session-ghost', ghost), source: 'spawn' })
+  assert.equal(ghost.length, 0, 'fail closed: an unknown owner is not a root')
+  // (b) the root resolves from the headers, but no live — or announced — agent carries it.
+  const orphan = []
+  mount.state.created({ agent: makeAgent('session-child', orphan), source: 'spawn' })
+  assert.equal(orphan.length, 0, 'fail closed: a root that is not here cannot be asked')
+  const skipped = journalOf(homeJ).filter((line) => line.step === 'register-skipped')
+  assert.deepEqual(skipped.map((line) => [line.id, line.why]), [
+    ['ghost', 'root-not-resolved'],
+    ['child', 'root-agent-unknown'],
+  ])
 })

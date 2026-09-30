@@ -620,6 +620,25 @@ export function spawnProducer(command, cwd, shell = resolveShell(), spillMaxByte
  */
 let unscopedJobs
 
+/**
+ * The Agents this mount has been told about, by session id.
+ *
+ * The ownership predicate below reads the ROOT's tool surface, and the root is an AGENT —
+ * not a session id — so the tool objects have to be kept. Both disclosure paths feed this
+ * map: `agent/created` (recorded before the verdict is formed) and the deferred `agents`
+ * injection's `list()`.
+ */
+const seenAgents = new Map()
+
+/**
+ * The live agent registry, captured by the deferred `agents` injection in `apply()`.
+ *
+ * The predicate asks IT for the root, before falling back to the announced map: the
+ * registry's own definition of an owner is "the live Agent currently registered under that
+ * id" (`dsh-jobs/lib/types/types.d.ts:122-128`), and a stale announcement is not that.
+ */
+let agentsService
+
 /** Trace lines emitted before a mount has its own state (capture happens at mount). */
 const bootState = { decisions: [] }
 
@@ -836,9 +855,11 @@ export function apply(ctx, config) {
       },
   }
 
-  // Per-Agent installation, the documented pattern. Every Agent gets the tool in
-  // its OWN surface, so the orchestrator and each worker can call it — and the
-  // registration dies with the Agent, which is what the practice note promises.
+  // Per-Agent installation, the documented pattern. Every Agent whose ROOT can collect
+  // gets the tool in its OWN surface, so the orchestrator and each worker can call it —
+  // and the registration dies with the Agent, which is what the practice note promises.
+  // An agent whose root cannot collect gets NOTHING, and the refusal is journalled: a
+  // visible tool that always fails is worse than an absent one.
   // The per-Agent installation belongs to the FIRST mount as well, for the same
   // reason as the capture: a second mount would register the same tool name into
   // the same agent surface again, which is a duplicate registration or a
@@ -871,6 +892,10 @@ export function apply(ctx, config) {
   // request and the answer so the absence is visible instead of silent.
   trace(bootState, { step: 'agents-inject-requested' })
   ctx.inject(['agents'], (agentCtx) => {
+    // Captured for the ownership predicate: `agents.get(id)` is the registry's own notion
+    // of "the live Agent registered under that id", which is exactly who must be able to
+    // collect a root-owned job.
+    agentsService = agentCtx.agents
     const known = agentCtx.agents.list()
     trace(bootState, { step: 'agents-ready', count: known.length })
     for (const agent of known) installOne(agent)
@@ -938,23 +963,157 @@ export function apply(ctx, config) {
  *
  * The registration is also announced, so a future deployment can tell whether the
  * hook fired for each agent instead of inferring it from an absence.
+ *
+ * THE REGISTRATION IS NOW CONDITIONAL ON THE OWNER, and that is not a refinement — it
+ * removes a MEASURED dead tool. In a composition with no preset (`tool-jobs` is
+ * `disabled: true` at the base and raised by a preset,
+ * `dsh-web-app/cordis.patch.yml:456-467`) the tool sat on every surface and EVERY call
+ * failed:
+ *
+ *   Error: background jobs unavailable: no job controller serves this agent
+ *          (load @deepseek-ai/dsh-tool-jobs in its composition)
+ *
+ * A visible tool that cannot work is the failing silence this project refuses: it costs
+ * prompt budget on every turn, and the caller learns about it only by failing. So the
+ * predicate asks whether the ROOT — the owner, never this agent — can collect a job: the
+ * root is the session that will still be there, and the only one that can read the output
+ * or kill the job.
+ *
  * @param agent - the Agent announced by `agent/created`.
  * @param tool - the `run_detached` definition to install into that Agent's surface.
  */
 function registerForAgent(agent, tool) {
   const id = agent?.session?.id
-  trace(bootState, { step: 'agent-created', id: typeof id === 'string' ? id.replace(/^session-/, '').slice(0, 8) : null })
+  trace(bootState, { step: 'agent-created', id: shortId(id) })
+  // Recorded BEFORE the verdict, whatever the verdict: the root of some LATER agent is
+  // looked up here, and a root announced under a name this module did not keep could not
+  // be found at all.
+  if (typeof id === 'string' && id !== '') seenAgents.set(id, agent)
   const target = agent?.ctx
   if (target === undefined) {
     trace(bootState, { step: 'register-skipped', why: 'agent-has-no-ctx', id: typeof id === 'string' ? id.slice(0, 20) : null })
     return
   }
+  const owner = ownerVerdict(id)
+  if (owner.collectable !== true) {
+    // Traced ALWAYS, and this line is the point of the change: a tool withdrawn without a
+    // line would be one more silence, in a module whose history is six rounds of wrong
+    // theory built on exactly such silences. `why` names the one condition that decided.
+    trace(bootState, {
+      step: 'register-skipped',
+      why: owner.why,
+      id: shortId(id),
+      ...(owner.root === undefined ? {} : { root: shortId(owner.root) }),
+      ...(owner.error === undefined ? {} : { error: owner.error }),
+    })
+    return
+  }
   target.inject(['tools'], (toolCtx) => {
     try {
       toolCtx.tools.register(tool)
-      trace(bootState, { step: 'registered', id: typeof id === 'string' ? id.replace(/^session-/, '').slice(0, 8) : null })
+      trace(bootState, {
+        step: 'registered',
+        id: shortId(id),
+        root: shortId(owner.root),
+        // Named once, at registration: this is the evidence that the surface was gated on
+        // the OWNER, and which agent's collection capability admitted it.
+        via: 'owner-can-collect',
+      })
     } catch (error) {
       trace(bootState, { step: 'register-failed', error: String(error?.message ?? error) })
     }
   })
+}
+
+/** The short id this journal uses everywhere, or null for anything that is not one. */
+function shortId(value) {
+  return typeof value === 'string' ? value.replace(/^session-/, '').slice(0, 8) : null
+}
+
+/**
+ * The live Agent registered under `id`.
+ *
+ * The live registry answers first — `get(id)` is the registry's own "the live Agent
+ * registered under that id", the notion ownership is defined by — and the announced map is
+ * the fallback for a deployment whose `agents` row is absent or has not resolved yet.
+ *
+ * @param id - the session id to look up.
+ * @returns the Agent, or undefined when no live or announced agent carries that id.
+ */
+function agentById(id) {
+  const getter = agentsService?.get
+  if (typeof getter === 'function') {
+    try {
+      const live = getter.call(agentsService, id)
+      if (live !== undefined) return live
+    } catch {
+      // A registry that throws on lookup answers nothing; the announced map still may.
+    }
+  }
+  return seenAgents.get(id)
+}
+
+/**
+ * Can the OWNER of `sessionId` collect a job started for it?
+ *
+ * THE PREDICATE IS ABOUT THE OWNER, NEVER ABOUT THE CALLER, and the whole design rests on
+ * that: the root is the session that outlives the caller, so the root is who must be able
+ * to read the job with `job_output` and stop it with `job_kill`. An agent that can collect
+ * for ITSELF proves nothing — the suite pins both directions (a worker whose own surface
+ * lacks `job_kill` still gets the tool when the ROOT has it, and a worker that has it does
+ * NOT get the tool when the root lacks it).
+ *
+ * WHY "SEES `job_kill`" MEANS "CAN COLLECT". In every shipped deployment the one provider
+ * of a job controller (`dsh-tool-jobs/lib/index.js:256`) is ALSO the only provider of the
+ * three collection tools (`:298`, `:348`, `:368`), so a root that can see `job_kill` is
+ * a root served by a controller. There is no public API to ask the question directly:
+ * `servesOwner` is private and has zero occurrences in the published contract.
+ *
+ * WHY THE SCOPE ARGUMENT IS THE AGENT OBJECT. Measured against the real registry on a real
+ * cordis app, with `job_kill` registered from a preset scope exactly as `dsh-tool-jobs`
+ * registers it:
+ *
+ *   tools.get('job_kill')                     -> undefined   (this is the GLOBAL layer only)
+ *   tools.get('job_kill', scopeOf(agent.ctx)) -> the definition
+ *   tools.get('job_kill', agent)              -> the definition
+ *
+ * The first line is why the no-scope form the issue proposed was NOT kept: it reads the
+ * global layer, so a preset-scoped `job_kill` is invisible to it and the tool would have
+ * been withheld in the very composition where it works. The agent OBJECT is that scope —
+ * the harness's own call sites pass it (`dsh-tools/lib/types/index.js:784`), the agent loop
+ * mints its scope with the agent as the key (`dsh-agent-loop/lib/index.js:778`), and
+ * `scopeOf(agent.ctx) === agent` was measured true — so this is `scopeOf` WITHOUT importing
+ * `@deepseek-ai/dsh-scope`, a package this plugin deliberately has no dependency on.
+ *
+ * @param sessionId - the session of the agent being registered, whose ROOT decides.
+ * @returns `{ collectable, root?, why?, error? }`; `why` names the condition when false.
+ */
+function ownerVerdict(sessionId) {
+  if (typeof sessionId !== 'string' || sessionId === '') return { collectable: false, why: 'caller-has-no-session-id' }
+  const root = rootOf(sessionId)
+  if (root === undefined) return { collectable: false, why: 'root-not-resolved' }
+  const owner = agentById(root)
+  if (owner === undefined) return { collectable: false, why: 'root-agent-unknown', root }
+  const ownerCtx = owner.ctx
+  if (ownerCtx === undefined) return { collectable: false, why: 'root-has-no-ctx', root }
+  // `ctx.get` and not `ctx.tools`: the latter throws on the property GET without an
+  // `inject` declaration, and this read is opportunistic by design — it must answer
+  // "no service here" rather than fail the registration path it guards.
+  let tools
+  try {
+    tools = typeof ownerCtx.get === 'function' ? ownerCtx.get('tools') : undefined
+  } catch {
+    return { collectable: false, why: 'root-tools-unavailable', root }
+  }
+  if (tools === undefined || typeof tools.get !== 'function') {
+    return { collectable: false, why: 'root-tools-unavailable', root }
+  }
+  let definition
+  try {
+    definition = tools.get('job_kill', owner)
+  } catch (error) {
+    return { collectable: false, why: 'owner-check-failed', root, error: String(error?.message ?? error) }
+  }
+  if (definition === undefined) return { collectable: false, why: 'owner-cannot-collect', root }
+  return { collectable: true, root }
 }
