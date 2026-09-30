@@ -14,10 +14,19 @@
 # requires another distinctly named tool"). Role specialisation is therefore
 # expressed as one distinctly named tool per role.
 #
-# `maxDepth` is deliberately omitted on every delegation row: omission reads the
-# Host `subagent.maxDepth` setting (initially 1), which already forbids a worker
-# from delegating further, and naming the field would require the provider to
-# advertise the `depthLimit` capability at mount time.
+# A worker CANNOT delegate, and two independent settings say so: `maxDepth` is
+# declared as 1 on every delegation row below, and the Host `subagent.maxDepth`
+# setting defaults to the same value. A worker sits at depth 1, so anything it
+# delegated would be depth 2 and is refused. Measured: four refusals in the
+# corpus ("subagent depth 2 exceeds maxDepth 1") from three distinct callers, and
+# no worker ever delegated successfully — the only depth-2 sessions found were
+# re-rooted continuation copies, which restart at depth 0 and bypass this cap.
+#
+# The `subagent` tool therefore stays VISIBLE in a worker's surface and always
+# refuses. That is deliberate: `tools.restrict()` refuses to name it from a child
+# ("names unknown global tool \"subagent\"" — it is installed per Agent by
+# `modelSelectionSettings`), so it cannot be denied the way the roles below deny
+# the other delegation tools. The refusal is loud, which is why it is accepted.
 
 - insert:
     - id: preset-boost
