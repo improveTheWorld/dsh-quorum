@@ -1,0 +1,9 @@
+# Relais host-level : remonte au propriétaire de l'arbre les settlements de jobs
+# lancés à l'intérieur de ses sous-agents.
+#
+# Monté au niveau HOST et non dans le preset boost : un tel job appartient à la
+# session qui l'a lancé, donc rien dans le preset ne peut le rendre visible au
+# père. La portée host permet en plus une activation à chaud, sans redémarrage.
+- insert:
+    - id: boost-job-relay
+      name: ./lib/index.js

@@ -1,0 +1,11 @@
+# Correctif de fond : `run_detached`.
+#
+# Monté au niveau HOST, et c'est une condition de fonctionnement, pas un détail :
+# le registre de jobs sert un propriétaire quelconque uniquement pour les
+# enregistrements faits depuis une portée NON scopée
+# (`dsh-jobs/lib/index.js:102-104`). Une portée scopée sous un agent ne servirait
+# que cet agent, et le préflight de `start` refuserait alors un job destiné à la
+# racine. Le niveau hôte est donc requis pour que `owner: <racine>` soit accepté.
+- insert:
+    - id: dsh-detached-jobs
+      name: ./lib/index.js

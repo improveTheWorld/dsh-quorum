@@ -1,0 +1,23 @@
+{
+  "name": "@local/dsh-boost-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host-level relay: reports background-job settlements owned by a session's subagents back to that session, closing the one blind spot in the DSH job registry (job ownership is fenced by the owner session id).",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "@local/dsh-boost",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aggregate Boost bundle: one installable package that mounts the five Boost lines (agent preset, job relay, /boost-status command, run_detached, surrogate guard) from a single cordis.patch.yml.",
+  "type": "module",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "docs/"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@local/dsh-boost-mode": "file:packages/boost-mode",
+    "@local/dsh-boost-relay": "file:packages/boost-relay",
+    "@local/dsh-boost-status": "file:packages/boost-status",
+    "@local/dsh-detached-jobs": "file:packages/detached-jobs",
+    "@local/dsh-guard-surrogate": "file:packages/guard-surrogate"
+  }
+}

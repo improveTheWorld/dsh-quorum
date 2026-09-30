@@ -1,0 +1,423 @@
+// Unit tests for the ACTIVATION of the detached-jobs plugin: what happens when the
+// host mounts the row. Zero dependencies: `node --test`.
+//
+//   node --test test/apply.test.mjs
+//
+// `root.test.mjs` covers ownership resolution. This file covers the half that had NO
+// test, and which therefore failed in production four times, silently:
+//
+//   1. `apply()` raised `ReferenceError: trace is not defined` — the tracing helper was
+//      missing from the module — and the catch block that exists precisely to report an
+//      activation failure called the same helper, so it raised again and escaped. Both
+//      rows sat at `fiberPhase: "failed"` with an empty journal across several restarts.
+//   2. `apply()` then raised `cannot get property "agents" without inject`: the module
+//      read a service it never declared. Optional chaining does not soften it — the
+//      throw happens on the property GET.
+//   3. The tool registered, and the registry refused it: `tool "run_detached" must
+//      declare output { schema, render, presentationMeta? }`. The row reads `active`
+//      and the tool is absent from every surface.
+//   4. Earlier still, `register-failed: detachedTool is not defined` — the tool object
+//      was declared inside `apply()` while the module-level installer used it.
+//
+// So the cases below are the ones that decided this design, and the harness is built to
+// reproduce the failure mode rather than to accommodate the code:
+//
+//   - the stub context is STRICT. Services are reachable only when declared, and an
+//     undeclared one throws on the property GET, exactly as cordis does. The first
+//     version of this file used a plain object, which answered `ctx.agents` happily —
+//     so the undeclared access passed here and failed in production instead;
+//   - the tool is checked against the registry's own output contract, taken from
+//     `dsh-tools/lib/types/index.js:459-466` and `lib/index.js:3616`;
+//   - every case reads the JOURNAL the module appends to, because "the row mounted"
+//     and "the tool registered" are exactly the facts that were unobservable.
+//
+// The module reads `DSH_HOME` at import time, so each fixture store is built first and
+// the module is imported dynamically afterwards, once per scenario — a distinct query
+// string gives each scenario its own module instance, hence its own captured jobs
+// service and its own journal.
+import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { test } from 'node:test'
+import { zstdCompressSync } from 'node:zlib'
+
+/** One zstd frame, the unit a session log is made of. */
+const frame = (record) => zstdCompressSync(Buffer.from(JSON.stringify(record) + '\n', 'utf8'))
+
+/** A durable session store holding `records`, each written as its own log file. */
+function seedSessions(home, records) {
+  for (const record of records) {
+    const dir = join(home, 'sessions', 'ws', record.id)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'session.v4.jsonl.zstd'),
+      Buffer.concat([frame({ type: 'session', ...record }), frame({ type: 'turn/start' })]),
+    )
+  }
+}
+
+/** The decisions the plugin appended, parsed. An absent journal reads as no decisions. */
+function journalOf(home) {
+  const path = join(home, 'plugin-data', 'dsh-boost-relay', 'decisions.jsonl')
+  try {
+    return readFileSync(path, 'utf8').trim().split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * A context shaped like the one cordis hands to `apply()`: a service is reachable
+ * only where it was injected, and an undeclared one throws on the property GET.
+ * Symbol and well-known introspection keys answer `undefined` so the proxy stays
+ * transparent to the runtime.
+ */
+function makeContext(services) {
+  return new Proxy(services, {
+    get(target, key) {
+      if (typeof key === 'symbol') return undefined
+      if (key === 'then' || key === 'constructor' || key === 'toJSON' || key === 'inspect') return undefined
+      if (Object.hasOwn(target, key)) return target[key]
+      throw new Error('cannot get property "' + String(key) + '" without inject')
+    },
+    has: (target, key) => Object.hasOwn(target, key),
+    ownKeys: (target) => Reflect.ownKeys(target),
+    getOwnPropertyDescriptor: (target, key) => Object.getOwnPropertyDescriptor(target, key),
+  })
+}
+
+/**
+ * A context as the loader hands one to `apply`.
+ * @param options.jobs - `null` means "this scope has no jobs service".
+ * @param options.onThrows - makes the mount fail at its first subscription.
+ * @param options.existingAgents - agents that already exist when the row mounts.
+ * @param options.shell - the shell service, when the deployment has a shell row.
+ */
+function makeCtx(options = {}) {
+  const state = { started: [], registered: [], commands: [], injected: [], events: [], created: undefined }
+  const jobs = options.jobs === null
+    ? undefined
+    : (options.jobs ?? { start: (spec) => { state.started.push(spec); return 'pwsh-test-1' } })
+  const services = {
+    // `on` and `inject` belong to every context, not to a service.
+    on: (event, handler) => {
+      if (options.onThrows === true) throw new Error('boom: this scope has no on()')
+      state.events.push(event)
+      if (event === 'agent/created') state.created = handler
+    },
+    inject: (deps, cb) => {
+      state.injected.push(deps)
+      // A deferred injection whose service never arrives NEVER calls back — that is what
+      // "deferred" means, and it is the case the "no shell service" scenario models. A
+      // context that answered a shell request without the service would model something
+      // cordis does not produce.
+      if (deps.includes('shell') && options.shell === undefined) return () => {}
+      const child = {}
+      if (deps.includes('agents')) child.agents = { list: () => options.existingAgents ?? [] }
+      if (deps.includes('commands')) child.commands = { register: (command) => state.commands.push(command) }
+      if (deps.includes('tools')) child.tools = { register: (tool) => state.registered.push(tool) }
+      if (deps.includes('jobs') && jobs !== undefined) child.jobs = jobs
+      if (deps.includes('shell') && options.shell !== undefined) child.shell = options.shell
+      cb(makeContext(child))
+      return () => {}
+    },
+  }
+  // Always present, even when undefined: `jobs: null` models a DECLARED service that
+  // resolved to nothing, which is the branch the tool's guard exists for. Omitting the
+  // key would model a scope that never declared it, and cordis would then refuse the
+  // mount before `apply()` ran — a different case, the one the hard `inject` list covers.
+  services.jobs = jobs
+  return { ctx: makeContext(services), state }
+}
+
+/** One Agent whose own scope provides the tools service, and nothing else. */
+function makeAgent(sessionId, registered) {
+  return {
+    session: { id: sessionId },
+    ctx: makeContext({
+      inject: (deps, cb) => {
+        if (!deps.includes('tools')) return () => {}
+        cb(makeContext({ tools: { register: (tool) => registered.push(tool) } }))
+        return () => {}
+      },
+    }),
+  }
+}
+
+const homeA = mkdtempSync(join(tmpdir(), 'dsh-detached-a-'))
+const homeB = mkdtempSync(join(tmpdir(), 'dsh-detached-b-'))
+const homeC = mkdtempSync(join(tmpdir(), 'dsh-detached-c-'))
+const homeD = mkdtempSync(join(tmpdir(), 'dsh-detached-d-'))
+// Scenario E: the shell service. TWO homes, because the tool is registered by the FIRST
+// mount of a module instance and its `shellProbe` is captured there — "with a shell row"
+// and "without one" cannot be two mounts of one instance, and two mounts sharing a journal
+// could not be told apart anyway.
+const homeE = mkdtempSync(join(tmpdir(), 'dsh-detached-e-'))
+const homeF = mkdtempSync(join(tmpdir(), 'dsh-detached-f-'))
+for (const home of [homeA, homeB, homeE, homeF]) {
+  seedSessions(home, [
+    { id: 'session-root' },
+    { id: 'session-child', parentSession: 'session-root' },
+  ])
+}
+// Scenario C: the journal path exists and is NOT writable, because it is a directory.
+mkdirSync(join(homeC, 'plugin-data', 'dsh-boost-relay', 'decisions.jsonl'), { recursive: true })
+
+process.env.DSH_HOME = homeA
+const A = await import('../lib/index.js?scenario=primary')
+process.env.DSH_HOME = homeB
+const B = await import('../lib/index.js?scenario=no-jobs-service')
+process.env.DSH_HOME = homeC
+const C = await import('../lib/index.js?scenario=dead-journal')
+process.env.DSH_HOME = homeD
+const D = await import('../lib/index.js?scenario=failing-mount')
+process.env.DSH_HOME = homeE
+const E = await import('../lib/index.js?scenario=shell-service')
+process.env.DSH_HOME = homeF
+const F = await import('../lib/index.js?scenario=no-shell-service')
+
+test.after(() => {
+  for (const home of [homeA, homeB, homeC, homeD, homeE, homeF]) rmSync(home, { recursive: true, force: true })
+})
+
+let primaryMount
+/** The one and only first mount of instance A, shared by the cases that need one. */
+function primary() {
+  if (primaryMount === undefined) {
+    const made = makeCtx()
+    A.apply(made.ctx, undefined)
+    primaryMount = made
+  }
+  return primaryMount
+}
+
+let toolOfA
+/** `run_detached` as installed into an Agent's surface, through the agent/created envelope. */
+function installedTool() {
+  if (toolOfA === undefined) {
+    const registered = []
+    primary().state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
+    toolOfA = registered[0]
+  }
+  return toolOfA
+}
+
+let toolOfB
+
+test('a first mount completes against a strict context', () => {
+  // The production failures were a missing helper, an undeclared service read, and a
+  // tool object out of the installer's scope. All three are loud here.
+  assert.doesNotThrow(() => { primary() })
+})
+
+test('the journal names the mount and the capture: the row is no longer silent', () => {
+  primary()
+  const lines = journalOf(homeA)
+  const captures = lines.filter((line) => line.step === 'capture')
+  assert.equal(captures.length, 1, 'exactly one mount may capture the unscoped service')
+  assert.equal(captures[0].via, 'first-mount')
+  assert.equal(lines.filter((line) => line.step === 'apply-complete').length, 1)
+  assert.equal(lines.filter((line) => line.step === 'mount').length, 1)
+  // The deferred agent enumeration: the request and its answer are both recorded, so
+  // a service that never arrives is visible instead of silent.
+  assert.equal(lines.filter((line) => line.step === 'agents-inject-requested').length, 1)
+  assert.equal(lines.filter((line) => line.step === 'agents-ready').length, 1)
+})
+
+test('the tool is installed into an Agent surface through the agent/created envelope', () => {
+  const tool = installedTool()
+  assert.ok(tool !== undefined, 'no tool reached the agent surface')
+  assert.equal(tool.name, 'run_detached')
+  assert.equal(typeof tool.execute, 'function')
+  assert.deepEqual(tool.parameters.required, ['command'])
+  const registered = journalOf(homeA).filter((line) => line.step === 'registered')
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].id, 'child', 'the short id proves the payload envelope was unwrapped')
+})
+
+test('the tool carries the registry output contract, whose absence is a register-failed line', () => {
+  // dsh-tools/lib/types/index.js:459-466 refuses a definition whose `output` is not
+  // `{ schema, render, presentationMeta? }`; the row then reads `active` while the
+  // tool is missing from every surface.
+  const tool = installedTool()
+  assert.equal(typeof tool.output, 'object')
+  assert.equal(typeof tool.output.render, 'function')
+  assert.equal(typeof tool.output.schema, 'object')
+  assert.equal(tool.output.schema.type, 'object')
+  assert.equal(tool.output.schema.additionalProperties, false)
+  assert.deepEqual([...tool.output.schema.required].sort(), ['job_id', 'owner', 'text'])
+  // `render` is what the native surface shows; the value passes through unchanged.
+  const blocks = tool.output.render({}, { job_id: 'j', owner: 'o', text: 'hello' })
+  assert.deepEqual(blocks, [{ type: 'text', text: 'hello' }])
+})
+
+test('the installed tool starts a job owned by the ROOT, never by the calling worker', async () => {
+  const mount = primary()
+  const before = mount.state.started.length
+  const result = await installedTool().execute(
+    { command: 'Start-Sleep -Seconds 40; Write-Output "DETACHED-OK"', label: 'test-detached' },
+    { agent: { session: { id: 'session-child' } }, cwd: 'C:\\CodeSource' },
+  )
+  assert.equal(mount.state.started.length, before + 1, 'exactly one job must be started')
+  const spec = mount.state.started[mount.state.started.length - 1]
+  assert.equal(spec.owner, 'session-root')
+  assert.notEqual(spec.owner, 'session-child')
+  assert.equal(spec.kind, 'pwsh')
+  assert.equal(spec.label, 'test-detached')
+  assert.equal(typeof spec.run, 'function')
+  // The value `execute` returns is what the PTC surface sees, so the id must be in it.
+  assert.equal(result.job_id, 'pwsh-test-1')
+  assert.equal(result.owner, 'session-root')
+  assert.match(result.text, /pwsh-test-1/)
+  // The caller here is a WORKER: a root-owned job is not readable from its session, so the
+  // id must be handed back. The opposite case has its own test below.
+  assert.match(result.text, /NOT readable from your session/)
+  assert.deepEqual([...Object.keys(result)].sort(), ['job_id', 'owner', 'text'])
+})
+
+test('a root that starts a detached job is told it can read it, not that it cannot', async () => {
+  // The readability sentence used to be CONSTANT, so the orchestrator — the one caller that
+  // CAN read a root-owned job — was told the job was unreadable from its session, which
+  // invites it to abandon a job it owns. Measured live on job pwsh-11, which the root read
+  // with job_output while the tool text claimed it could not.
+  const mount = primary()
+  const before = mount.state.started.length
+  const result = await installedTool().execute(
+    { command: 'Write-Output "ROOT-OWNED"', label: 'root-detached' },
+    { agent: { session: { id: 'session-root' } }, cwd: 'C:\\CodeSource' },
+  )
+  assert.equal(mount.state.started.length, before + 1)
+  assert.equal(result.owner, 'session-root', 'the root owns the job it starts')
+  assert.match(result.text, /owned by this session/)
+  assert.doesNotMatch(result.text, /NOT readable from your session/)
+  assert.match(result.text, /job_output/)
+})
+
+
+test('an unresolvable root refuses instead of starting a job with the wrong owner', async () => {
+  const mount = primary()
+  const before = mount.state.started.length
+  await assert.rejects(
+    () => installedTool().execute({ command: 'echo hi' }, { agent: { session: { id: 'session-absent-from-the-store' } } }),
+    /could not resolve the session root/,
+  )
+  assert.equal(mount.state.started.length, before, 'nothing may be started when the owner is unknowable')
+})
+
+test('a second mount neither captures again nor installs the tool a second time', () => {
+  const second = makeCtx()
+  A.apply(second.ctx, undefined)
+  assert.equal(journalOf(homeA).filter((line) => line.step === 'capture').length, 1)
+  const registered = []
+  assert.equal(typeof second.state.created, 'function')
+  second.state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
+  assert.equal(registered.length, 0, 'a duplicate mount must not register the same tool name twice')
+  assert.ok(journalOf(homeA).some((line) => line.step === 'install-skipped' && line.why === 'not-the-first-mount'))
+})
+
+test('an Agent that already existed at mount time still gets the tool', () => {
+  const registered = []
+  const mount = makeCtx({ jobs: null, existingAgents: [makeAgent('session-child', registered)] })
+  B.apply(mount.ctx, undefined)
+  assert.equal(registered.length, 1, 'a resumed session must not be left without the tool')
+  toolOfB = registered[0]
+  assert.equal(toolOfB.name, 'run_detached')
+  const ready = journalOf(homeB).filter((line) => line.step === 'agents-ready')
+  assert.equal(ready.length, 1)
+  assert.equal(ready[0].count, 1)
+})
+
+test('the tool refuses when no unscoped jobs service was captured — no silent fallback', async () => {
+  await assert.rejects(
+    () => toolOfB.execute({ command: 'echo hi' }, { agent: { session: { id: 'session-child' } } }),
+    /not available/,
+  )
+})
+
+test('a mount that throws records apply-failed and does not rethrow', () => {
+  const mount = makeCtx({ onThrows: true })
+  assert.doesNotThrow(() => D.apply(mount.ctx, undefined))
+  const lines = journalOf(homeD)
+  const steps = lines.map((line) => line.step)
+  assert.ok(steps.includes('capture'), 'the capture happens before the failing step')
+  const failed = lines.filter((line) => line.step === 'apply-failed')
+  assert.equal(failed.length, 1)
+  assert.match(failed[0].error, /boom/)
+  assert.ok(steps.indexOf('capture') < steps.indexOf('apply-failed'))
+})
+
+test('a journal that cannot be written does not break the mount it observes', () => {
+  const journalPath = join(homeC, 'plugin-data', 'dsh-boost-relay', 'decisions.jsonl')
+  assert.ok(statSync(journalPath).isDirectory(), 'the fixture must make the journal unwritable')
+  const mount = makeCtx()
+  assert.doesNotThrow(() => C.apply(mount.ctx, undefined))
+  const registered = []
+  mount.state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].name, 'run_detached')
+})
+
+test('the started job carries a pull source that never yields a byte', async () => {
+  // The registry advertises a full-output file only from a source it READ, and only while
+  // its pump exists — i.e. only when `spec.output` is a NON-EMPTY array. The source exists
+  // to carry the PATH: `text` is always empty, so the pump never reaches `sink.append`,
+  // the ring is not touched, and the measured "delivered exactly once" property stands.
+  const mount = primary()
+  const before = mount.state.started.length
+  await installedTool().execute(
+    { command: 'echo hi', label: 'source' },
+    { agent: { session: { id: 'session-child' } }, cwd: 'C:\\CodeSource' },
+  )
+  assert.equal(mount.state.started.length, before + 1)
+  const spec = mount.state.started[mount.state.started.length - 1]
+  assert.equal(Array.isArray(spec.output), true)
+  assert.equal(spec.output.length, 1, 'a non-empty output is what makes the registry open its pump')
+  const source = spec.output[0]
+  // Before the producer has run there is no path yet — and there is never any text.
+  assert.deepEqual(source.read(0), { text: '', nextOffset: 0, lossy: false })
+  for (let offset = 0; offset < 1000; offset++) {
+    assert.deepEqual(source.read(offset), { text: '', nextOffset: offset, lossy: false })
+  }
+  assert.equal(Object.hasOwn(source, 'channel'), false, 'no channel: there is no text to attribute')
+})
+
+test('a configured pwshPath is read from the shell service and journalled', async () => {
+  const pwshPath = 'D:\\tools\\pwsh.exe'
+  const mount = makeCtx({ shell: { get pwshPath() { return pwshPath } } })
+  E.apply(mount.ctx, undefined)
+  const ready = journalOf(homeE).filter((line) => line.step === 'shell-ready')
+  assert.equal(ready.length, 1, 'the deferred shell injection must be answered once')
+  assert.equal(ready[0].pwshPath, pwshPath)
+  // Deferred, never a hard dependency — the request is visible in the journal with it.
+  assert.equal(mount.state.injected.some((deps) => deps.includes('shell')), true)
+  // And a job still starts, so honouring the config did not replace the working path.
+  const registered = []
+  mount.state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
+  assert.equal(registered.length, 1)
+  const result = await registered[0].execute(
+    { command: 'echo hi', label: 'shell-configured' },
+    { agent: { session: { id: 'session-child' } }, cwd: 'C:\\CodeSource' },
+  )
+  assert.equal(mount.state.started.length, 1, 'a job must still be started')
+  assert.equal(mount.state.started[0].owner, 'session-root')
+  assert.equal(result.job_id, 'pwsh-test-1')
+})
+
+test('without a shell service the row still starts jobs, on the explicit fallback', async () => {
+  // The injection never resolves here, which is what "this composition has no shell row"
+  // means for a deferred dependency: there is no `shell-ready` line to read, and the job
+  // must still start through `resolveShell()`.
+  const mount = makeCtx()
+  assert.doesNotThrow(() => F.apply(mount.ctx, undefined))
+  assert.equal(journalOf(homeF).filter((line) => line.step === 'shell-ready').length, 0)
+  const registered = []
+  mount.state.created({ agent: makeAgent('session-child', registered), source: 'spawn' })
+  assert.equal(registered.length, 1)
+  const result = await registered[0].execute(
+    { command: 'echo hi', label: 'shell-absent' },
+    { agent: { session: { id: 'session-child' } }, cwd: 'C:\\CodeSource' },
+  )
+  assert.equal(mount.state.started.length, 1, 'the fallback must still start the job')
+  assert.equal(result.job_id, 'pwsh-test-1')
+})

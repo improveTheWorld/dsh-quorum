@@ -1,0 +1,11 @@
+# `/boost-status` : état temps réel, y compris quand l'agent est bloqué.
+#
+# Monté au niveau HOST et non dans le preset `boost`, pour deux raisons :
+#   1. une commande s'exécute sur le plan de commande de l'UI, donc elle répond
+#      même pendant qu'un appel d'outil est en vol — précisément le cas d'usage ;
+#   2. un nouveau bundle s'active à chaud, alors qu'éditer le patch d'un bundle
+#      déjà chargé exige un redémarrage.
+# Une commande n'entre ni dans la requête ni dans l'historique : coût modèle nul.
+- insert:
+    - id: boost-status-command
+      name: ./lib/index.js

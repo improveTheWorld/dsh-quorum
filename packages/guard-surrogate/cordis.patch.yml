@@ -1,0 +1,21 @@
+# Ligne du garde-fou surrogate, pour la couche `dsh` du profil.
+#
+# Cette couche est un BUNDLE (voir `package.json`, `dsh.bundle.patch`). Elle est
+# reliée au profil par `link:`, donc le seul chemin utile est ici : le profil
+# ajoute l'inclusion (dépendance `@local/dsh-guard-surrogate` + entrée
+# `dsh.profile.bundles`) à son propre `package.json`, jamais une ligne.
+#
+# Forme « insert » OBLIGATOIRE : dans une couche de patch, une entrée sans liste
+# `insert:` ne crée pas de ligne, elle modifie des champs d'une ligne EXISTANTE.
+# Un id que personne ne déclare n'a donc aucune cible et l'avertissement part
+# dans le terminal de `dsh web`, c'est-à-dire nulle part où on le lise.
+#
+# Niveau HOST : le waterfall `tools/post-execute` est dispatclé sur le service
+# `tools` (monté à la racine), filtré par la portée de l'agent appelant. Une
+# ligne montée ici voit donc les résultats de TOUS les agents ; une ligne
+# scopée sous un agent ne verrait que les siens.
+- insert:
+    - id: dsh-guard-surrogate
+      name: ./lib/index.js
+      config:
+        enabled: true

@@ -1,0 +1,23 @@
+{
+  "name": "@local/dsh-boost-status",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host-level /boost-status command: reports the live delegation state of a session from the UI command plane, which answers even while the agent is blocked inside a long tool call.",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

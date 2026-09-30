@@ -1,0 +1,11 @@
+# Dependencies installed for the `file:` sub-packages (`dsh plugin add` / pnpm).
+node_modules/
+
+# Scratch reports written by tools/ (`--out`, `--json-out`); reports are not
+# repository content, and a stale one is worse than none.
+*.out.txt
+*.out.json
+
+# OS / editor noise.
+.DS_Store
+Thumbs.db
