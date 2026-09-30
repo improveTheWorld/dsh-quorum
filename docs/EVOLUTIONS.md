@@ -33,7 +33,7 @@ de tokens** — tout garde-fou qui lit l'en-tete est aveugle sur deux cinquiemes
 | Lectures redondantes entre freres | **66,1 %** des lectures ; commandes dupliquees : 3,2 % |
 | Fichiers que la mere avait deja lus | **359 / 1565 paires (22,9 %)** |
 | Silence d'un enfant avant son avis de reglement | p50 **373 s**, p90 765 s, max 6 714 s |
-| Paires de freres jugeant le MEME commit avec verdicts opposes | **0 / 139** |
+| Paires de freres jugeant le MEME commit avec verdicts opposes | **0** (denominateur dependant de la definition ; voir §4) |
 
 ---
 
@@ -87,7 +87,8 @@ qui affiche deja « Subagent parallelism limit ». Le namespace est l'`id` de la
 
 **Deja mordu — mesure, pas projection.** 9 refus `subagent limit reached (active child limit: 8)`
 le 30/09 dans un seul arbre, etales sur **305,1 s**, plus **4 refus de profondeur**. Soit 13 refus sur
-159 creations, **5,7 %**. La definition d'« agent vivant » employee pour reconstruire l'arbre donne
+159 creations — **8,2 %** : 9 de capacite (5,7 %) et 4 de profondeur. Ce pourcentage etait faux
+(5,7 % rapporte aux 13 refus) ; corrige apres falsification. La definition d'« agent vivant » employee pour reconstruire l'arbre donne
 exactement 8 enfants vivants a chacun des 9 instants de refus : la methode est validee par l'evenement
 qu'elle devait predire.
 
@@ -121,7 +122,8 @@ re-racine l'arbre.
 
 **Verdict : MESURABLE ET CONSTRUCTIBLE — la donnee existe deja, il manque la garde.**
 
-**La formule, verifiee sur 21 630 enregistrements sans exception :**
+**La formule, verifiee sans exception sur 30 894 enregistrements d'usage** re-mesures lors de la falsification
+(le chiffre de 21 630 provenait d'un releve anterieur, sur un corpus plus petit, et n'est pas reproductible) **:**
 
 ```
 horsCache(session)  = totals.uncachedInputTokens + totals.outputTokens
@@ -130,7 +132,7 @@ consommation        = somme de horsCache(s) pour s dans ctx.sessions.list()
 
 Trois pieges nommes : ne pas ecrire `totalTokens - cacheReadTokens` (le champ `totalTokens` n'existe pas
 dans `totals`), ne pas ajouter `reasoningTokens` (sous-ensemble de `outputTokens`, 0 cas contraire sur
-12 598), ne pas compter sur `cacheWriteTokens` (present 8 909 fois, **toujours nul**).
+12 598), ne pas compter sur `cacheWriteTokens` (present 18 318 fois sur ce corpus, **toujours nul**).
 
 **Lecture.** `ctx.sessionProjections.stateOf(session, 'tokenUsage')`, synchrone, O(1) amorti — le cumul
 est **deja calcule par le harnais**, par session.
@@ -167,8 +169,11 @@ cours produit un verdict faux, ce qui coute plus cher qu'un depassement.
 
 **Verdict : FONDE, mais pas par le mecanisme imagine.**
 
-**Ce que la mesure DEMENTIT.** Sur **139 paires de freres** comparables, **zero** jugent le meme commit
-avec des verdicts opposes. Les 55 paires a verdict global oppose ont des missions differentes jugeant
+**Ce que la mesure DEMENTIT.** Sur les paires de freres comparables, **zero** jugent le meme commit
+avec des verdicts opposes. *(Reserve de falsification : le denominateur depend d'une definition de « paire
+comparable » et d'un verdict de prose. L'enquete annoncait 139 paires ; la falsification n'a pas pu le
+reproduire — mais sur TOUTES ses variantes, jusqu'a 34 paires a polarite opposee, le compteur « meme
+commit » reste a zero. La direction de l'affirmation tient ; le denominateur est declare, pas affirme.)* Les 55 paires a verdict global oppose ont des missions differentes jugeant
 des etats differents — les citer comme des contradictions serait exactement l'erreur « compter les
 occurrences de texte » que ce projet a payee deux fois.
 
