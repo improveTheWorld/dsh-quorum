@@ -1,11 +1,17 @@
 # Plan — Mode `boost` pour DeepSeek Harness
 
+> **Document historique — l'état fait foi dans `docs/HANDOVER.md`.** Ce plan décrit la conception
+> d'origine du mode Boost et ses jalons M0–M5. Il contient une copie du `cordis.patch.yml` (§7) qui a
+> **divergé** des patches réellement montés, et des affirmations que les mesures suivantes ont périmées :
+> elles sont marquées **périmé** sur place, avec la valeur actuelle. Ne rien en déduire sur l'état courant —
+> installer, composer et tester se lisent dans `README.md` (racine) et `docs/HANDOVER.md`.
+
 Équivalent DSH du `/boost` de Google Antigravity : un **mode de raisonnement profond multi-agents**
 sélectionnable à côté de `standard`, `ptc`, `minimal` et `cordis` (creator), avec des sous-agents
 qui héritent eux aussi de **PTC**.
 
 - Statut : **M0 et M1 réalisés** (voir §0) ; M2–M5 à faire
-- Version DSH cible : `0.1.7-rc.2` (installée), profil `web`
+- Version DSH cible : `0.1.7-rc.2` — **périmé** : le disque et le process vivant portent **`0.2.0-rc.2`** (`dsh --version`, mesuré le 2026-09-30 ; process `dsh web` pid 4248, démarré le 30/09 à 20:17:31). Profil `web`
 - Livrable attendu : bundle installable `C:\CodeSource\dsh-boost-mode\` déclarant le preset `boost`
 
 ---
@@ -126,11 +132,21 @@ Correctifs appliqués :
 (bilan : 9 `run_code` réussis, 6 échoués). Cela affecte le preset `ptc` livré à l'identique.
 Contournement : garder les sessions Boost en `danger-full-access` jusqu'à correction amont.
 
-**Fait établi au passage : un host en cours ne relit pas un patch de bundle.** Test par ligne sonde
+**Fait établi au passage : un host en cours ne relit pas un patch de bundle SEUL.** Test par ligne sonde
 (`preset-boost-probe` ajouté puis retiré) : la déclaration n'est jamais apparue dans l'arbre vivant
-(`Config.listConfigs` → toujours 5 entrées). `patchReload: live` ne couvre donc pas les patchs de
-bundle : **toute modification d'un `cordis.patch.yml` de bundle exige un redémarrage de DSH**, alors
-qu'une nouvelle session suffit pour un preset déjà déclaré.
+(`Config.listConfigs` → toujours 5 entrées).
+
+**Périmé.** La conclusion qui suivait — « toute modification d'un `cordis.patch.yml` de bundle exige un
+redémarrage de DSH » — est **fausse pour un patch de profil**, et la mesure est dans le harnais :
+`dsh-hmr/lib/index.js:353-376` ne surveille que **trois** chemins — `<profil>/package.json`,
+`<profil>/cordis.patch.yml` et `$DSH_HOME/cordis.patch.yml` — et compare leur **contenu** (`:360-368`).
+Dès que l'un des trois change, il relit **toutes** les couches depuis le disque
+(`readProfilePatches` puis `reconcileProfilePatches`, `:369-370`), **patchs de bundle compris, sans
+redémarrage**. C'est ainsi que le seuil de compaction du preset `boost` a été appliqué à chaud le
+2026-09-30 (la mesure est écrite dans `profiles\web\cordis.patch.yml:85-104`), et c'est aussi ce qui
+impose de faire une bascule de profil en **une seule passe** (`docs/HANDOVER.md` §11). Ce qui reste vrai :
+un patch de bundle modifié **sans toucher** à l'un des trois chemins surveillés n'est jamais relu, et
+ajouter une **ligne** à un patch de preset n'est pas relu à chaud non plus.
 
 ### M1-quater — Run de production : le mode marche, la vérification a dérivé
 
@@ -481,7 +497,7 @@ Or `y08lin4/dsh-multiagent-modes`, `flash-director` et `oh-my-dsh-slim` s'instal
 un répertoire dans `~/.dsh/.agent-presets/` — **que DSH 0.1.7 ne lit plus**
 (`editing-cordis-compositions` : « Nothing reads that directory any more »).
 
-**Conclusion.** Vous êtes sur `0.1.7-rc.2`. Aucune de ces implémentations ne fonctionnera telle quelle.
+**Conclusion** — *périmée : le disque et le process vivant portent `0.2.0-rc.2` depuis le 2026-09-30, et le livrable est le dépôt consolidé `C:\CodeSource\dsh-boost` (voir `docs/HANDOVER.md`) ; la conclusion ci-dessous est celle du moment de ce plan, où l'installation portait `0.1.7-rc.2`.* Vous êtes sur `0.1.7-rc.2`. Aucune de ces implémentations ne fonctionnera telle quelle.
 Il faut soit migrer l'une d'elles vers le modèle déclaratif, soit — ce que propose ce plan — écrire
 le preset `boost` nativement en déclaratif, en réutilisant leurs idées de conception (rôles par
 `toolFilter`, budget, validation de brief, ledger « enfant non réglé »).
@@ -495,7 +511,7 @@ cible de `boost`.
 
 ## 4. Faits DSH vérifiés qui contraignent la conception
 
-Tous vérifiés dans l'installation `0.1.7-rc.2` (chemins sous
+Tous vérifiés dans l'installation `0.1.7-rc.2` — **périmé : c'est `0.2.0-rc.2` qui est installé depuis le 2026-09-30** (chemins sous
 `…\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\`).
 
 | # | Fait | Source |
@@ -609,6 +625,12 @@ plugin_manager { action: "install_bundle", target: "C:\\CodeSource\\dsh-boost-mo
 ---
 
 ## 7. Composition du preset `boost`
+
+> **Copie historique, et elle a divergé.** Le bloc qui suit recopie le `cordis.patch.yml` du bundle tel
+> qu'il était au moment du plan. Le patch réel est `packages/boost-mode/cordis.patch.yml`, agrégé par le
+> `cordis.patch.yml` de la racine du dépôt `C:\CodeSource\dsh-boost` — et c'est le nœud du `preset-boost`
+> de CE fichier qui est monté. `test/aggregate.test.mjs` (4 cas) défend l'égalité entre les deux, mais rien
+> ne relie cette copie-ci : ne pas s'en servir comme source.
 
 `cordis.patch.yml` (M1) — les lignes marquées ★ diffèrent du preset `ptc` livré.
 
@@ -878,12 +900,23 @@ Doit construire des cas limites, exécuter la suite réelle (et non des mocks), 
 brute** ; un test simulé, ignoré ou dont la sortie n'est pas montrée est un **échec** ; rend
 `VERDICT: pass|fail` + `COUNTEREXAMPLES` + `RAW EVIDENCE` + `WHAT I COULD NOT CHECK`.
 
-`toolFilter` : **allow-list** (lecture + shell + jobs) plutôt qu'une deny-list, pour que
-l'impossibilité d'écrire soit structurelle et non déclarative :
+`toolFilter` : **périmé — c'est une deny-list qui est montée, pas une allow-list.** Le plan proposait
+une allow-list (lecture + shell + jobs) pour rendre l'impossibilité d'écrire structurelle et non
+déclarative. La configuration réelle est l'inverse : chaque rôle porte un `deny:`
+(`packages/boost-mode/cordis.patch.yml`, et la même ligne dans le `cordis.patch.yml` agrégateur). Mesuré
+le 2026-09-30 : **16** noms refusés pour `subagent_verify` (`packages/boost-mode/cordis.patch.yml:310-327`
+— `write`, `edit`, `present`, `ask_user_question`, `todo_write`, `exit_plan_mode`, `subagent_fork`,
+`subagent_investigate`, `subagent_implement`, `subagent_verify`, `send_message`, `interrupt_agent`,
+`list_agents`, `get_goal`, `create_goal`, `update_goal`), **13** pour `subagent_implement` (les mêmes
+moins `write`, `edit`, `todo_write`). La composition `dsh --profile boost-test --dump-config` porte
+exactement ces listes. *L'orchestrateur de cette passe annonçait « une deny-list de 14 noms » : je ne
+retrouve pas 14 — c'est 16, ou 13 selon le rôle.*
 
 ```yaml
 toolFilter:
-  allow: [read, read_image, glob, grep, pwsh, bash, job_list, job_output, job_kill]
+  deny:
+    - write        # 16 noms pour subagent_verify, 13 pour subagent_implement
+    - …
 ```
 
 ### 8.5 Paramètres à monter (F14)

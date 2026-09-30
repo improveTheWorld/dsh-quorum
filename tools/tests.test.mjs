@@ -11,6 +11,19 @@
 //      `data` matches nothing;
 //   3. `subagent` is a prefix of its sibling role tools, so a substring count
 //      invents generic delegations — and a later check reasoned on them.
+//
+// `tools/find-clock.mjs` was REMOVED from this directory, and this note is the only
+// trace it leaves on purpose. A grep of every `.md` and every `.mjs` in the repository
+// returned ZERO references to it outside its own usage line: no document cited it, no
+// report imported it, and no case below covered it — so nothing could have noticed it
+// drifting, which is the orphan shape this suite exists to prevent. Its question (which
+// records carry a clock reading) is one invocation of the tool that IS cited and IS
+// covered here:
+//
+//   node tools/find-text.mjs <session-prefix> "Time sampled"
+//
+// which searches a session tree for a literal needle and says which record type carries
+// it, instead of being a second, untested copy of that same search.
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

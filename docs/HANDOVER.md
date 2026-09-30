@@ -1,7 +1,7 @@
 # Passation — mode Boost DSH
 
 Document autoportant. Il est écrit pour une session qui **n'a aucun souvenir** de celle qui l'a
-précédé. Lis-le en entier avant d'agir, puis exécute la section « Première action ».
+précédé. Lis-le en entier avant d'agir, puis applique la procédure de coupure du §11 : c'est elle qui met le dépôt consolidé et le profil vivant d'accord.
 
 Les règles de méthode permanentes sont chargées automatiquement depuis `~/.dsh/AGENTS.md` (dix règles :
 le fond jamais le pansement, des tests toujours, instrumenter avant de conclure, revérifier l'état sur
@@ -91,15 +91,48 @@ L'état vérifié est dans §5.
 ## 4. Les trois contrôles — faits, et comment les refaire
 
 **A. La ligne s'est-elle activée ?** Le journal du plugin répond mieux que l'inventaire, et il ne
-dépend d'aucun outil de la session :
+dépend d'aucun outil de la session. **Mais il faut lire les deux fichiers**, et la raison est mesurée.
+
+**Pourquoi la recette d'origine rendait un faux négatif par construction.** Le relais **tourne** son
+journal à chaque démarrage : `decisions.jsonl` ne contient que les enregistrements du process vivant
+depuis son démarrage, et les enregistrements de cycle de vie de ce démarrage partent dans
+`decisions.jsonl.1`. Mesure du 2026-09-30 (process `dsh web` pid **4248**, démarré à 20:17:31) :
+
+| fichier | `"step":"mount"` | `capture` | `apply-complete` | `agents-ready` | `"via":"first-mount"` |
+|---|---|---|---|---|---|
+| `decisions.jsonl` (courant) | **0** | 0 | 0 | 0 | 0 |
+| `decisions.jsonl.1` (tourné) | 9 | 9 | 8 | 8 | 9 |
+
+L'activation du process vivant était aux **lignes 677744-677748** de `.1` :
+
+```
+677744 {"at":"2026-09-30T18:17:34.761Z","step":"mount","first":true,"pid":4248}
+677745 {"at":"2026-09-30T18:17:34.762Z","step":"capture","via":"first-mount","pid":4248,"share":false}
+677746 {"at":"2026-09-30T18:17:34.763Z","step":"agents-inject-requested"}
+677747 {"at":"2026-09-30T18:17:34.763Z","step":"apply-complete"}
+677748 {"at":"2026-09-30T18:17:34.896Z","step":"agents-ready","count":0}
+```
+
+La recette d'origine — `Get-Content decisions.jsonl | Select-String -Pattern 'mount|capture|…'` — ne
+lisait que le fichier **courant**, où ces motifs sont à **0** : elle n'y rendait plus que des
+`registered`, qui sont des enregistrements de **jobs** (28 `"step":"registered"` d'agents et 910
+`"type":"registered"` de jobs mesurés dans le courant), pas des montages. Et dans `.1`, **9 `mount`
+pour 8 `apply-complete`** : un démarrage a échoué (`apply-failed`, pid 22180, « cannot get property
+"agents" without inject » — la cause n°3 du §3). La lecture se fait donc par **`pid`**, jamais par « le
+dernier du fichier ».
+
+Recette corrigée — elle ne dépend d'aucun fichier courant :
 
 ```powershell
-Get-Content "C:\Users\bilel\.dsh\plugin-data\dsh-boost-relay\decisions.jsonl" |
-  Select-String -Pattern 'mount|capture|apply-complete|apply-failed|registered|register-failed'
+$dir = "$env:USERPROFILE\.dsh\plugin-data\dsh-boost-relay"
+Get-ChildItem "$dir\decisions.jsonl*" |
+  Select-String -Pattern '"step":"(mount|capture|agents-inject-requested|apply-complete|apply-failed|agents-ready)"'
 ```
-Attendu : `mount` (`first:true`), `capture` (`via:"first-mount"`), `agents-inject-requested`,
-`apply-complete`, `agents-ready`, puis un `registered` par agent. **Un seul `mount` par process** : la
-composition ne porte qu'une déclaration qui monte (§6).
+Sortie brute du 2026-09-30 (extrait, les neuf démarrages) : `decisions.jsonl.1:677744 … :677748` pour le
+pid 4248 (montage complet), et `decisions.jsonl.1:12256-12258` pour le pid 22180
+(`mount` → `capture` → `apply-failed`). Attendu pour le pid visé : `mount` (`first:true`) et
+`capture` (`via:"first-mount"`), puis `agents-inject-requested`, `apply-complete`, `agents-ready`.
+**Un seul `mount` par process** : la composition ne porte qu'une déclaration qui monte (§6).
 
 **B. L'outil est-il dans MA surface ?** C'est le contrôle décisif, et il est direct. `plugin_manager` et
 `cordis_inspect_query` **ne sont pas dans la surface PTC** de cette session (mesuré : `undefined`) ; on
@@ -163,9 +196,9 @@ refusée (`unknown job`) a disparu du même coup.
 ### Test 3 — non-régression de l'outillage
 
 ```
-cd C:\CodeSource\dsh-boost-mode
-node --test tools/tests.test.mjs          # attendu : 22/22
-node --test ..\dsh-detached-jobs\test\root.test.mjs   # attendu : 10/10
+cd C:\CodeSource\dsh-boost
+node --test tools/tests.test.mjs                          # attendu : 22/22
+node --test packages\detached-jobs\test\root.test.mjs   # attendu : 10/10
 ```
 
 ### Test 4 — les deux preuves qui exigent un process neuf (1 minute)
@@ -174,7 +207,7 @@ Le code d'un module ne se recharge qu'avec un process neuf : après un redémarr
 deux commandes doivent rendre ce qui suit. Elles ne modifient rien.
 
 ```
-cd C:\CodeSource\dsh-detached-jobs
+cd C:\CodeSource\dsh-boost\packages\detached-jobs
 node --test                                  # attendu : 52/52 (sans argument !)
 node tools/probe-spill-announce.mjs          # attendu : PROBE-PASS, spillPaths non vide, exit 0
 ```
@@ -211,17 +244,35 @@ Si un jour il fallait déclarer une ligne dans ce patch, la seule forme qui cré
 
 ## 7. Inventaire
 
+**Dépôt consolidé `C:\CodeSource\dsh-boost`** (git, commit initial `652ef83`) — c'est lui qui porte le
+livrable. Les cinq dépôts d'origine ne sont plus que des cibles de `link:` tant que le profil n'a pas été
+repointé (§11).
+
 | Chemin | Rôle |
 |---|---|
-| `C:\CodeSource\dsh-boost-mode\cordis.patch.yml` | déclaration du preset `preset-boost` + persona orchestrateur + rôles |
-| `C:\CodeSource\dsh-boost-mode\PLAN.md` | plan complet, annexes A-D, décisions et mesures |
-| `C:\CodeSource\dsh-boost-mode\PROTOCOL.md` | protocole de torture + règles anti-contamination |
-| `C:\CodeSource\dsh-boost-mode\tools\` | `session-log.mjs` (décodage zstd multi-frame), `parse.mjs` (helpers purs), `boost-report.mjs`, `audit.mjs`, `protocol.mjs`, `integrity.mjs`, `find-text.mjs`, `check-notices.mjs`, `tests.test.mjs` |
-| `C:\CodeSource\dsh-boost-relay\` | relais des settlements de jobs d'enfants — **fonctionne** |
-| `C:\CodeSource\dsh-detached-jobs\` | `run_detached` : `lib/index.js`, `test/root.test.mjs` (propriété), `test/apply.test.mjs` (activation, contexte strict), `test/shell.test.mjs` (résolution du shell), `tools/probe-profile-import.mjs` (résolution par la jonction) — **actif et vérifié** |
-| `C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml` | patch du profil : configuration de lignes **existantes** — une entrée sans `insert:` ne crée rien |
-| `C:\CodeSource\dsh-boost-status\` | commande `/boost-status` — active |
-| `C:\Users\bilel\.dsh\plugin-data\dsh-boost-relay\decisions.jsonl` | journal de décisions des **deux** plugins |
+| `package.json` (racine) | **le livrable** : `@local/dsh-boost`, `dsh.bundle.patch: ./cordis.patch.yml`, cinq dépendances `file:packages/<paquet>` |
+| `cordis.patch.yml` (racine) | **UNE** entrée `insert:` portant les cinq lignes, recopiées des cinq patches d'origine |
+| `index.js` | entry point du bundle — aucune API runtime |
+| `test/aggregate.test.mjs` | le test anti-dérive (4 cas) : ids, `config` en JSON canonique, `name` résolvant vers le même module, aucun id dupliqué |
+| `docs/HANDOVER.md` | **ce document — l'état fait foi ici** |
+| `docs/PLAN.md` | **document historique** : conception, jalons M0-M5, copie du patch qui a divergé, affirmations périmées marquées comme telles |
+| `docs/PROTOCOL.md` | protocole des trois phases + prompt de mission de torture + recevabilité d'une preuve |
+| `tools/` | **onze** fichiers (relevé du 2026-09-30) : `session-log.mjs` (décodage zstd multi-frame), `parse.mjs` (helpers purs, testés), `boost-report.mjs` (rapport de run), `audit.mjs` (contrôles de santé), `protocol.mjs` (notation du protocole), `integrity.mjs` (a-t-on lu l'interdit), `find-text.mjs` (où vit une chaîne), `check-notices.mjs` (le père a-t-il entendu ses fils), `diagnose-frames.mjs` (trame zstd sur disque), `dump-records.mjs` (types et formes d'enregistrements), `tests.test.mjs` (22 cas). `find-clock.mjs` a été **retiré du dépôt** pendant la passe du 2026-09-30 (`git status` : ` D tools/find-clock.mjs`) — ne pas le chercher |
+| `packages/boost-mode/` | `preset-boost` (`@local/dsh-boost-mode`) : `cordis.patch.yml` (persona orchestrateur + trois rôles + leurs `toolFilter`), `lib/index.js`, `README.md` — **aucune suite de tests** |
+| `packages/boost-relay/` | `boost-job-relay` (`@local/dsh-boost-relay`) : `lib/index.js`, `test/notice.test.mjs` (5), `test/journal.test.mjs` (9), `README.md` — **fonctionne** |
+| `packages/boost-status/` | `boost-status-command` (`@local/dsh-boost-status`) : commande `/boost-status`, `test/status.test.mjs` (10) — active |
+| `packages/detached-jobs/` | `dsh-detached-jobs` (`@local/dsh-detached-jobs`) : `lib/index.js`, `test/root.test.mjs` (10, propriété), `test/apply.test.mjs` (15, activation en contexte strict), `test/shell.test.mjs` (8, résolution du shell), `test/spill.test.mjs` (9, déversement et livraison unique), `test/purge.test.mjs` (10, purge du store), `tools/probe-profile-import.mjs` (résolution par la jonction), `tools/probe-spill-announce.mjs` (annonce par le vrai registre) — **actif et vérifié** |
+| `packages/guard-surrogate/` | `dsh-guard-surrogate` (`@local/dsh-guard-surrogate`) : `lib/index.js`, `lib/walker.js`, `test/guard.test.mjs` (26), `README.md` — répare les surrogates isolés sur `tools/post-execute` (§10) |
+
+**Hors du dépôt, mais sur le chemin critique** :
+
+| Chemin | Rôle |
+|---|---|
+| `C:\Users\bilel\.dsh\profiles\web\package.json` | **le profil réel** : cinq `link:` vers les cinq **dépôts d'origine** (pas vers le dépôt consolidé — c'est ce que règle le §11), plus `@local/dsh-auto-update` |
+| `C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml` | patch du profil : configuration de lignes **existantes** — une entrée sans `insert:` ne crée rien. Les trois entrées mortes `time-context` / `schedule` / `ui-schedule` sont aux **lignes 61-66** (§11) |
+| `C:\Users\bilel\.dsh\profiles\boost-test\` | le profil de recette : `"@local/dsh-boost": "link:C:/CodeSource/dsh-boost"`, jonction `node_modules\@local\dsh-boost`, et les cinq ids dans `--dump-config` |
+| `C:\Users\bilel\.dsh\profiles\local-plugins\dsh-auto-update\` | `@local/dsh-auto-update` — **bundle de profil, hors de ce dépôt** : outil `harness_update` (`status`/`check`/`apply`/`migrate`), commande `/update`, notification de version dans le prompt, `lib/*.js`, `install.ps1`, `test/selftest.mjs` |
+| `C:\Users\bilel\.dsh\plugin-data\dsh-boost-relay\decisions.jsonl` (+ `.1`) | journal de décisions des **deux** plugins, **avec rotation** — les enregistrements de cycle de vie du process vivant sont dans `.1` (§4.A) |
 | `C:\CodeSource\boost-torture-archive\` | campagnes 1 et 2, **contaminées** — archives uniquement |
 
 ## 8. Faits du harnais à ne pas redécouvrir
@@ -451,16 +502,81 @@ session est une concaténation de frames zstd sans somme de contrôle embarquée
 seuls `skipped = 0` et `emptyTail = 0` sur 188 journaux soutiennent la moitié négative. C'est la limite du
 dossier, et elle se dit.
 
-## 11. Le redémarrage : ce qu'il faut faire, et dans quel ordre
+## 11. Procédure de coupure — tout en UNE passe sur le profil, puis un redémarrage
 
-Trois choses sont sur le disque et **pas** dans le process vivant (pid 4296, démarré le 30/09 à 00:36,
-build 0.1.7-rc.2 ; le disque porte 0.2.0-rc.2 depuis 17:29). Un seul redémarrage les active — mais il y a
-des choix à faire **avant**, parce que `dsh-hmr` surveille le `package.json` et le `cordis.patch.yml` du
-profil : les modifier en cours de session force une relecture de toutes les couches depuis le disque, donc
-d'injecter du 0.2.0 dans un process 0.1.7.
+**Ce n'est plus « ce qui se fera au redémarrage » : c'est la procédure de bascule du profil vivant sur
+le dépôt consolidé.** État mesuré le 2026-09-30 : le disque porte **0.2.0-rc.2** (`dsh --version` ;
+`package.json` du harnais écrit le 30/09 à 17:29:06) et le process vivant **aussi** — `dsh web` est le pid
+**4248**, démarré à **20:17:31**, donc **après** l'installation ; le relais en a laissé la trace
+(`decisions.jsonl.1:677744`, `{"step":"mount","first":true,"pid":4248}`). Ce qui reste n'est donc **pas**
+une montée de version, mais quatre gestes : **repointer les liens**, **purger les trois entrées mortes**,
+**faire revenir `/schedule`**, **monter la garde**.
 
-**1. Retirer trois entrées mortes** du patch du profil — elles ne visent aucune ligne et ne produisent que
-trois avertissements dans le terminal, où personne ne les lit :
+**Pourquoi tout en UNE passe.** `dsh-hmr` ne surveille que **trois** chemins — `<profil>/package.json`,
+`<profil>/cordis.patch.yml` et `$DSH_HOME/cordis.patch.yml` (`dsh-hmr/lib/index.js:353-376`) — et compare
+leur **contenu** (`:360-368`) : dès que le texte change, il relit **toutes** les couches depuis le disque
+(`readProfilePatches` puis `reconcileProfilePatches`, `:369-370`). Éditer le profil en deux fois, c'est
+faire vivre au process un état intermédiaire : liens à moitié repointés, bundle déclaré mais jonction
+absente. **Écrire tout, puis redémarrer une fois.**
+
+### Étape 0 — le `pnpm` du PATH, avant toute commande
+
+Sur cette machine, le `pnpm` du PATH est le shim nvm et échoue (`No active Node.js version is
+configured`). Le `pnpmCommand` du patch de profil (`profiles\web\cordis.patch.yml:23-32`) n'est lu que
+par le gestionnaire **composé** : mesuré, `dsh plugin --profile web list` échoue avec le même message.
+Pour toute commande `dsh plugin` ou `pnpm` de cette procédure :
+
+```powershell
+$env:PATH = 'C:\Program Files\nodejs\node_modules\corepack\shims;' + $env:PATH
+```
+
+### Étape 1 — repointer les cinq liens, ou passer au seul agrégateur
+
+Deux formes, **jamais les deux** (l'exclusion mutuelle est expliquée dans le README racine) :
+
+**A. L'agrégateur seul (recommandé).** Une commande fait tout, avec le PATH de l'étape 0 :
+
+```powershell
+dsh plugin --profile web add C:\CodeSource\dsh-boost
+```
+
+Elle écrit `"@local/dsh-boost": "link:C:/CodeSource/dsh-boost"` dans `dependencies`, crée la jonction
+`profiles\web\node_modules\@local\dsh-boost` et ajoute le nom **en queue** de `dsh.profile.bundles`.
+**Elle ne retire rien** : il faut, dans la même passe, supprimer les cinq `link:` d'origine de
+`dependencies` **et** les noms correspondants de `dsh.profile.bundles` (`@local/dsh-boost-mode`,
+`@local/dsh-boost-status`, `@local/dsh-boost-relay`, `@local/dsh-detached-jobs`, et
+`@local/dsh-guard-surrogate` s'il y a été ajouté). Les garder *avec* l'agrégateur monterait chaque ligne
+**deux fois** (`dsh-app-boot/lib/index.js:87`).
+
+**B. Les cinq liens vers le dépôt consolidé.** Dans `profiles\web\package.json` :
+
+```json
+"@local/dsh-boost-mode": "link:C:/CodeSource/dsh-boost/packages/boost-mode",
+"@local/dsh-boost-relay": "link:C:/CodeSource/dsh-boost/packages/boost-relay",
+"@local/dsh-boost-status": "link:C:/CodeSource/dsh-boost/packages/boost-status",
+"@local/dsh-detached-jobs": "link:C:/CodeSource/dsh-boost/packages/detached-jobs",
+"@local/dsh-guard-surrogate": "link:C:/CodeSource/dsh-boost/packages/guard-surrogate"
+```
+
+et `dsh.profile.bundles` doit lister les cinq noms correspondants — dont
+`@local/dsh-guard-surrogate`, qu'il ne porte **pas** aujourd'hui. `@local/dsh-auto-update` reste tel quel
+(il vit hors du dépôt, dans `profiles\local-plugins\`). Éditer `dependencies` ne crée **aucune**
+jonction : dans cette forme, `pnpm install` (étape 0 pour le PATH) passe **avant** le redémarrage, sinon
+les bundles ne se résolvent pas.
+
+### Étape 2 — purger les trois entrées mortes du patch de profil
+
+Elles sont aux **lignes 61-66** de `profiles\web\cordis.patch.yml`, ne visent aucune ligne, et ne
+produisent que trois avertissements au démarrage, où personne ne les lit. Mesuré, `dsh --profile web
+--dump-config` les imprime **en tête de sa sortie** :
+
+```
+dsh: [C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml] patch: entry "time-context" not found
+dsh: [C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml] patch: entry "schedule" not found
+dsh: [C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml] patch: entry "ui-schedule" not found
+```
+
+À supprimer :
 
 ```yaml
 - id: time-context
@@ -471,18 +587,38 @@ trois avertissements dans le terminal, où personne ne les lit :
   disabled: false
 ```
 
-Ces ids existent **0 fois** dans la composition 0.2.0. Même famille que la ligne `run-detached-jobs` retirée
-le 29/09 (§6).
+Ces ids existent **0 fois** dans la composition 0.2.0 : leurs seules occurrences dans le `--dump-config`
+sont les trois avertissements ci-dessus (les deux autres occurrences de « schedule » sont
+`scheduledDelayMillis`, un champ de configuration sans rapport). Même famille que la ligne
+`run-detached-jobs` retirée le 29/09 (§6).
 
-**2. Décider du `/schedule`.** Sous 0.1.7 ces lignes étaient portées par le cœur ; sous 0.2.0, la
-composition web « n'en porte aucune » (mot pour mot du patch de `dsh-experimental-schedule-bundle`). Pour
-garder `/schedule` et ses outils, il faut déclarer ce bundle dans `dsh.profile.bundles` — sinon la fonction
-disparaît au redémarrage.
+### Étape 3 — faire revenir `/schedule` (déjà perdu)
 
-**3. Décider de la garde anti-surrogate** (`C:\CodeSource\dsh-guard-surrogate`, cf. §10). Quatre gestes,
-décrits dans son README : déclarer `"@local/dsh-guard-surrogate": "link:C:/CodeSource/dsh-guard-surrogate"`
-dans les `dependencies` **et** dans `dsh.profile.bundles`, `pnpm install` dans le profil, ajouter
-`- id: dsh-guard-surrogate` / `config: { enabled: true }` au patch du profil, puis redémarrer. Elle est
+Sous 0.1.7 ces lignes étaient portées par le cœur ; sous 0.2.0, la composition web « n'en porte aucune » —
+mot pour mot du patch de `dsh-experimental-schedule-bundle` : « Experimental Schedule over the shipped Web
+composition, **which carries none of these rows** ». Il faut donc déclarer ce bundle dans
+`dsh.profile.bundles` :
+
+```json
+"@deepseek-ai/dsh-experimental-schedule-bundle"
+```
+
+**Ce n'est pas une hypothèse, c'est déjà arrivé** : mesuré, le process vit maintenant en 0.2.0-rc.2
+(pid 4248, démarré le 30/09 à 20:17:31, **après** l'installation du build) **sans** ces outils — la
+composition web ne porte aucune ligne `schedule`/`ui-schedule` et les outils `schedule_*` ont disparu.
+Sans cette déclaration, la fonction ne revient pas au redémarrage.
+
+### Étape 4 — monter la garde anti-surrogate (§10)
+
+**L'agrégateur la porte déjà** : sa cinquième ligne est `dsh-guard-surrogate`
+(`packages/guard-surrogate/cordis.patch.yml`, `config: { enabled: true }`). Avec la forme **A** de
+l'étape 1, il n'y a donc **rien** à ajouter au patch du profil — c'est précisément ce que l'agrégateur
+apporte en plus des quatre autres lignes. Avec la forme **B**, reprendre les quatre gestes du README de
+`C:\CodeSource\dsh-boost\packages\guard-surrogate` : déclarer
+`"@local/dsh-guard-surrogate": "link:C:/CodeSource/dsh-boost/packages/guard-surrogate"` dans
+`dependencies` **et** dans `dsh.profile.bundles`, `pnpm install`, puis redémarrer (l'entrée
+`- id: dsh-guard-surrogate` / `config: { enabled: true }` au patch du profil est facultative : la ligne
+est créée par le patch du bundle). Elle est
 **neutre par construction** : `await next()` toujours en premier, décision rendue par identité quand rien ne
 change, seuls les blocs de texte touchés — **y compris `kind: 'block'`**, dont le `feedback` traverse le même
 marcheur depuis la passe de correction. État mesuré par l'orchestrateur sur la révision `16d88f5` :
@@ -491,9 +627,24 @@ passe laissait `k` *sauter en silence* sans cette variable, ce qui est un échec
 Résidus assumés, écrits dans son README : un listener plus externe qui court-circuite sans appeler `next()`
 empêche la garde de tourner, et les chemins `final-result` ne couvrent que les échecs hors corps d'outil.
 
-**4. Redémarrer, puis vérifier** — les contrôles du §5 (test 4) : `node --test` doit rendre **52/52** dans
-`dsh-detached-jobs`, `node tools/probe-spill-announce.mjs` doit rendre `PROBE-PASS`, un job lancé par la
-racine doit rendre le texte de la racine, et un chemin annoncé doit finir par `-<6 hexa>.log`. Côté garde,
-`$DSH_HOME/plugin-data/dsh-guard-surrogate/repairs.jsonl` n'existe **que** si elle a réparé quelque chose :
-son absence veut dire « rien à réparer », pas « inerte » — d'où le test `k` de son dépôt, qui est le seul à
-pouvoir distinguer les deux.
+### Étape 5 — matérialiser les jonctions
+
+Forme A : `dsh plugin add` l'a déjà fait. Forme B : `pnpm install` dans `profiles\web` (PATH de l'étape 0).
+Rien d'autre à vérifier ici : une jonction absente se voit au démarrage suivant, sous forme de bundle
+introuvable.
+
+### Étape 6 — redémarrer une fois, puis vérifier
+
+```powershell
+dsh --profile web --dump-config      # AUCUN "patch: entry … not found"
+node --test                          # racine du dépôt consolidé : 128/128
+cd packages\detached-jobs; node --test             # 52/52
+cd ..\guard-surrogate;    node --test             # 26/26
+```
+
+Puis les contrôles du §5 (test 4) : `node tools\probe-spill-announce.mjs` doit rendre `PROBE-PASS`, un job
+lancé par la racine doit rendre le texte de la racine, et un chemin annoncé doit finir par `-<6 hexa>.log`.
+Côté garde, `$DSH_HOME/plugin-data/dsh-guard-surrogate/repairs.jsonl` n'existe **que** si elle a réparé
+quelque chose : son absence veut dire « rien à réparer », pas « inerte » — d'où le test `k` de son dépôt,
+qui est le seul à pouvoir distinguer les deux. Enfin, `dsh --profile web --dump-config` doit porter les
+cinq ids du mode **une fois chacun** : c'est le contrôle qui dit que la bascule est complète.

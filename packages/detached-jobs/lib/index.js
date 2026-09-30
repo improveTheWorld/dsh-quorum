@@ -700,7 +700,20 @@ export function apply(ctx, config) {
             'Jobs détachés — propriété de la session racine',
             `service non scopé capturé : ${unscopedJobs === undefined ? 'NON' : 'oui'}`,
             `capturé par : ${config?.share === true ? 'config.share' : 'premier montage'}`,
-            'Le montage du preset enregistre l’outil ; ce montage fournit la portée.',
+            // The sentence below used to claim the OPPOSITE of what this module does
+            // ("Le montage du preset enregistre l'outil ; ce montage fournit la portée").
+            // The comment on the tool object below — "It is deliberately NOT registered
+            // from this row's own context: that reached the tools service but never an
+            // agent's composed surface (measured twice — host row and preset row)",
+            // lib/index.js:722-724 — says why that was false, and
+            // `packages/boost-mode/cordis.patch.yml:369-384` records the same
+            // measurement: "run_detached n'est PAS déclaré ici". The truth is the other way
+            // round: THIS host mount captures the unscoped service AND installs the tool
+            // into each Agent's surface from its agent/created listener; the preset row
+            // registers nothing.
+            // `run_detached` est donc installé par agent depuis CE montage hôte, et non
+            // depuis la portée d'une ligne : le montage du preset n'enregistre rien.
+            'outil run_detached : installé par agent sur agent/created, jamais déclaré depuis la portée de cette ligne.',
           ].join('\n'),
         }),
       })

@@ -29,7 +29,14 @@ const DEFAULT_FORBIDDEN = [
   'find-text.mjs',
   'PROTOCOL.md',
   'decisions.jsonl',       // the relay's own instrumentation
-  'boost-torture\\raw-notices', // a previous run's extracted evidence
+  // A previous campaign's extracted evidence. Its REAL location is
+  // `C:\CodeSource\boost-torture-archive\campagne-1-2-contaminees\raw-notices*` — the
+  // older `boost-torture\raw-notices` has not existed for a while (`Test-Path` → False)
+  // — and one SEGMENT is the only form that can match here: the comparison below is a
+  // case-insensitive SUBSTRING on a re-stringified JSON argument (l. 73), and
+  // `JSON.stringify` doubles every backslash, so no multi-segment Windows path can ever
+  // appear literally in it. A segment matches both separators and both spellings.
+  'boost-torture-archive',
 ]
 
 const argv = process.argv.slice(2)

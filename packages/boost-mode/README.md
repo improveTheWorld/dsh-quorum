@@ -96,7 +96,7 @@ node tools/boost-report.mjs                       # session la plus récente hor
 node tools/boost-report.mjs --session <id>        # session exacte (le plus fiable)
 node tools/boost-report.mjs --list                # sessions candidates
 node tools/boost-report.mjs --out r.txt --json-out r.json
-node tools/boost-report.mjs --briefs --brief-chars 600 --max-errors 40
+node tools/boost-report.mjs --no-briefs --brief-chars 600 --max-errors 40
 ```
 
 Le rapport contient : l'arbre de délégation (rôle, label, modèle, durée, tokens, issue par session),

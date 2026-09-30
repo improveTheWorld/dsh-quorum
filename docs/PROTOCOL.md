@@ -115,10 +115,22 @@ provoquer ni les imiter.
 ### Découverte annexe, à retenir
 
 Le worker 04 a échoué **deux fois** avant d'atteindre le garde-fou : sa surface PTC n'expose pas
-`subagent_investigate` (TypeError) mais bien `tools.subagent`. Le plafond de profondeur a donc **deux
-couches indépendantes** : la surface d'outils du worker, qui ne lui donne pas les rôles, et `maxDepth`,
-qui refuse la délégation générique. C'est une bonne nouvelle de conception — et cela signifie que
-scénario 04 doit demander au worker d'utiliser `tools.subagent`, pas un rôle.
+`subagent_investigate` (TypeError) mais bien `tools.subagent`. **Re-mesuré le 2026-09-30 dans la surface
+d'un worker de rôle, et c'est toujours exact** : `typeof tools.run_detached` et `typeof tools.subagent`
+sont des **fonctions**, tandis que `subagent_investigate`, `subagent_implement`, `subagent_verify`,
+`subagent_fork`, `send_message`, `list_agents`, `interrupt_agent` et `present` sont **`undefined`** —
+la surface du worker ne porte que les 17 outils que le `deny:` de son rôle laisse passer (`read`,
+`write`, `edit`, `pwsh`, `job_*`, `run_detached`, `subagent`, …).
+
+**Ce qui refuse la délégation, en revanche, c'est `maxDepth: 1` — pas un filtre d'outils.** Les noms de
+rôle absents sont une **conséquence** du `deny:` du preset ; ils ne gardent rien par eux-mêmes, et le
+générique `subagent` **survit** dans la surface du worker précisément parce qu'un enfant ne peut pas le
+refuser : `tools.restrict()` répond « names unknown global tool "subagent" », l'instance à
+`modelSelectionSettings` étant l'enregistrement propre de l'agent (mesuré, écrit dans
+`packages/boost-mode/cordis.patch.yml:171-176`). Le seul garde-fou de profondeur est donc le plafond porté
+par chaque ligne : `maxDepth: 1`. C'est une bonne nouvelle de conception — et cela signifie que le
+scénario 04 doit demander au worker d'utiliser `tools.subagent`, pas un rôle : c'est **l'appel** qui doit
+être refusé, et il l'est par la profondeur.
 
 ## Limites connues
 
