@@ -179,3 +179,78 @@ et non une recherche de texte : c'est le declencheur qui manquait a l'agent arbi
 - **Le niveau de granularite du N** (combien de messages gardes par agent) : a calibrer sur une
   mesure, pas sur une intuition.
 - **Le cout du canal lui-meme** : a instrumenter comme le reste, avant de generaliser.
+---
+
+## 11. Mesure A/B du brief indexe — 2026-09-30, n = 3 par condition
+
+Six enfants, **mission identique** (trois faits a extraire du depot, avec la commande brute exigeante),
+trois avec un **index source** en plus, trois sans. L'index contenait une **valeur deliberement fausse**
+(`SPILL_MAX_BYTES = 16777216` ; la vraie vaut `32 * 1024 * 1024`, ligne 242).
+
+### Surete : 3/3 ont attrape le piege
+
+```
+B1 : « la valeur [valeur] 16777216/16 Mio est FAUSSE »
+B2 : « la valeur du parent (16777216) est fausse »
+B3 : « PAS 16777216 (l'entree [valeur] du parent est fausse) »
+```
+
+Les trois temoins ont rendu les memes reponses justes : **la qualite est egale**, seule la depense differe.
+
+### Cout : le mecanisme est net, l'effet ne l'est pas
+
+```
+              hors-cache   dispatches   exploration   lectures   sortie
+A1 temoin        9 518         15            6            2        4 158
+A2 temoin        6 725         12            7            1        2 543
+A3 temoin        6 853          9            5            2        2 787
+moyenne A        7 699        12,0          6,0          1,67      3 163
+
+B1 indexe        5 585          6            2            0        1 925
+B2 indexe        6 014         11            2            2        2 233
+B3 indexe        9 566          9            4            2        2 976
+moyenne B        7 055         8,67         2,67         1,33      2 378
+
+exploration   -56 %     <- la RECHERCHE s'effondre
+sortie        -25 %     <- l'effort de reflexion baisse
+lectures      -20 %     <- a peine
+entree        +3 %      <- INCHANGEE : l'index coute ce que la recherche coutait
+hors-cache     -8,4 %   <- dans le bruit a n=3
+```
+
+### Ce que la mesure etablit
+
+**Un index dit OU, pas QUOI — donc il economise la recherche, pas la lecture.** L'index coute a peu
+pres ce que la recherche coutait (+3 % d'entree), et le contenu, l'enfant le lit quand meme. Le gain
+porte sur l'**effort** (la sortie du modele), pas sur le **contexte**.
+
+Consequence pour la regle de role (§10 de EVOLUTIONS.md) : donner un index a un enfant cooperatif
+**n'allege pas son contexte, il accelere sa mise au travail**. Pour couper la facture, le levier est
+ailleurs — et le corpus le chiffre : la **sortie** (10,6 M sur 23,0 M de hors-cache chez les enfants)
+et les **lectures** (5,2 M, soit 22,5 %).
+
+### La tension, desormais explicite
+
+La regle « tout fait utilise doit etre soutenu par une commande » rend l'index sur — et **dissout son
+economie d'entree** : 3/3 ont re-mesure. Sans la regle, l'economie apparait et les erreurs se
+propagent invisiblement.
+
+D'ou la distinction a tester ensuite, entre deux classes de connaissance :
+
+```
+navigation (ou sont les choses, conventions, structure)  -> a faire confiance : economise la recherche
+assertion  (une valeur, un diagnostic, une cause)        -> a re-mesurer si l'enfant l'utilise
+```
+
+Dans l'experience, la fausse valeur etait une **assertion** — attrapee ; et l'enfant a verifie meme
+l'entree de **navigation** exacte, parce que la regle ne distinguait pas les deux classes.
+
+### Limites declarees
+
+- **n = 3 par condition**, sur une tache triviale (~7 700 hors-cache contre **130 000 pour un enfant
+  reel** — un facteur 17) : la mesure etablit la **structure** de l'effet, pas son ampleur.
+- Une seule forme de tache : extraire des faits a des endroits connus. Sur une tache
+  d'**interpretation**, un index ne substitue rien et l'effet serait nul.
+- Un seul piege, vu trois fois : cela prouve que la regle **peut** marcher, pas qu'elle marche
+  toujours.
+
