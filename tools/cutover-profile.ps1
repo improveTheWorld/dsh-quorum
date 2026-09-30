@@ -87,7 +87,18 @@ if (-not $Apply) {
   exit 0
 }
 
-Write-Host '=== 2-5. application ===' -ForegroundColor Cyan
+Write-Host '=== 2. jonction — AVANT toute ecriture ===' -ForegroundColor Cyan
+# L'ordre est load-bearing : ecrire package.json declenche dsh-hmr, qui relit TOUTES les couches
+# depuis le disque. Si la jonction de l'agregateur n'existe pas encore a cet instant, le
+# rechargement monte un paquet introuvable.
+$nm = Join-Path $prof 'node_modules\@local'
+New-Item -ItemType Directory -Force -Path $nm | Out-Null
+$link = Join-Path $nm 'dsh-boost'
+if (Test-Path $link) { Remove-Item $link -Force -Recurse }
+New-Item -ItemType Junction -Path $link -Target 'C:\CodeSource\dsh-boost' | Out-Null
+Write-Host ('  ' + $link + ' -> C:\CodeSource\dsh-boost')
+
+Write-Host '=== 3-6. application ===' -ForegroundColor Cyan
 Copy-Item $pkgPath $bakPkg -Force
 Copy-Item $patchPath $bakPatch -Force
 $oldDeps = @{}

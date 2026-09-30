@@ -104,3 +104,38 @@ les mesures du corpus : 97,08 % de cache, 86 % de vacance de l'arbre, 0/139 cont
 Et quatre mecanismes sans equivalent trouve sur le marche : **le frein hors cache**, **le job possede par
 la racine**, **le relais adaptatif**, **la garde anti-surrogate**. Les trois premiers sont des lignes hote :
 leur sort ne depend **pas** des choix ci-dessus.
+
+---
+
+## Partie 5 — La coupure, appliquee le 2026-10-01 a 01:57
+
+**Appliquee et verifiee sur disque** :
+
+```
+profil web/package.json : 5 dependances -> 2 (agregateur + auto-update)
+                          8 bundles -> 6 (+ @local/dsh-boost, + schedule-bundle)
+cordis.patch.yml        : 104 -> 98 lignes (time-context, schedule, ui-schedule purges)
+jonction                : node_modules/@local/dsh-boost -> C:\CodeSource\dsh-boost
+dsh --profile web --dump-config : 0 avertissement, les cinq ids presents une fois chacun
+```
+
+**Ce que le rechargement a chaud a fait, et n'a pas fait — mesure** :
+
+```
+A FAIT   : monte les lignes NEUVES — les outils schedule_* sont revenus dans ma propre surface
+           (ils avaient disparu au passage en 0.2.0), et la garde est entree dans la composition
+N'A PAS  : remplace le code d'une ligne DEJA montee. Preuve : apres la coupure, un agent cree
+FAIT       trace {"step":"registered","id":…} — l'ANCIEN format ; le code neuf ecrit
+           {"step":"registered","id":…,"root":…,"via":"owner-can-collect"}
+```
+
+C'est la regle du cache ESM, desormais **demontree sur ce cas precis** : `patchReload: live` recompose la
+liste des couches, il ne recharge pas le code d'un module deja importe.
+
+**Consequence : un redemarrage reste necessaire** pour charger le correctif `detached-jobs`, faire
+monter la garde pour de vrai, et faire lire les cinq lignes depuis le depot consolide. Ce n'est plus une
+precaution : c'est mesure.
+
+**Sauvegardes** (retour arriere en une copie) : `package.json.20261001-015721.bak` et
+`cordis.patch.yml.20261001-015721.bak`, dans le profil `web`.
+
