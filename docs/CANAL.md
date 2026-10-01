@@ -125,6 +125,29 @@ confort : c'est la condition de faisabilite du canal.
    brouilleur semantique — pire qu'un brouilleur bruyant, parce qu'il est credible.
 6. **Le destinataire peut dire stop** : baisser la verbosite ou la cadence **en cours de vol**, pas
    seulement a la naissance.
+
+   Mesure du 1er octobre : il pouvait filtrer ce qu'il **tire** (`channel_read` : kind, date,
+   jamais-lu) mais subissait tout ce qu'on lui **pousse** — le jeton de la regle 7 borne le *volume*,
+   rien ne bornait le *contenu*. **La politique d'injection appartient donc au DESTINATAIRE** (le
+   proprietaire de l'arbre), jamais a l'emetteur : c'est son contexte qui est en jeu. Elle se regle de
+   deux facons — la cle de configuration `injectKinds` sur la ligne du plugin, ou l'outil
+   **`channel_subscribe({ inject: [...] })`**, qui la rend reglable **en cours de vol**. Le nom
+   `inject` est une **liste d'autorisation** : `[]` n'injecte plus aucun kind ordinaire,
+   `["decouverte","avancement"]` remet le defaut permissif. Seul le proprietaire de l'arbre peut
+   l'appeler : un non-proprietaire est refuse, compte (`subscribe_refused`), et sa demande ne change
+   rien.
+
+   **Elle ne s'applique QU'AUX KINDS NON REVEILLANTS** — `decouverte` et `avancement`. Un
+   `question`, un `resultat` ou un `echec` passe **TOUJOURS**, meme sous un filtre vide. Sans
+   cette clause, l'arbitre deviendrait un **filtre a disparition** : le proprietaire qui filtre le
+   bruit perdrait aussi le signal, et la bourse reservee de la regle 7 ne servirait plus a rien. C'est
+   la condition non negociable du dispositif, et c'est ce que la falsification de `T-F2` verifie.
+
+   **Un message filtre n'est jamais perdu** : il est **stocke** (comme un message throttle), marque
+   `filtered: true`, compte (`filtered`, `filtered_by_kind`) et reste **tirable** par
+   `channel_read`. Meme regle que le jeton : on refuse la livraison, jamais l'ecriture. Le refus
+   explicite du destinataire **prime sur la borne de volume** : quand les deux refuseraient, c'est la
+   politique qui est rendue.
 7. **Le budget de LIVRAISON appartient au destinataire** — mesure du 1er octobre. La regle 2 bornait la
    **taille** ; le **nombre** ne l'etait pas : le chemin `inject` livrait sans plafond, et 200
    `avancement` d'un meme enfant injectaient 200 lignes (~26 000 caracteres, ~6 500 tokens) dans le
@@ -194,6 +217,25 @@ Chaque refus porte une ligne de journal `{"step":"throttled", id, from, kind, pu
 budget}` : la bourse epuisee est **nommee** (`ordinary` ou `reserved`) et le restant est ecrit.
 Une bourse epuisee ne change ni l'eligibilite (elle depend du kind SEUL) ni la politique de reveil :
 elle retire une livraison, jamais une regle.
+
+Et les trois compteurs de la politique du destinataire (regle 6) :
+
+```
+filtered            messages refuses par la POLITIQUE DU DESTINATAIRE : stockes, marques
+                    'filtered: true', tirables. Le compter separement de 'delivered' est ce qui
+                    distingue « moins livre » de « perdu », et separement de 'throttled' ce qui
+                    distingue « le destinataire a dit non » de « le volume a dit stop ».
+filtered_by_kind    le meme compte, par kind : un total ne dit pas CE QUE le proprietaire refuse.
+subscribe_refused   tentatives de regler la politique sans en etre le proprietaire de l'arbre —
+                    meme forme que 'read_refused', parce qu'un refus muet se lit comme un
+                    reglage applique.
+```
+
+Une ligne `{"step":"filtered", id, from, kind, inject}` porte le **filtre en vigueur**, et
+`{"step":"subscribe-refused", from, root, why}` le refus. Une valeur de configuration invalide est
+journalisee (`inject-config-invalid`) et laisse le defaut **permissif** : un montage ne tombe pas
+pour un reglage, alors qu'un appel d'outil invalide **leve** — la, l'appelant est vivant et peut lire
+l'erreur.
 
 ---
 

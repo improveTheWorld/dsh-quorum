@@ -16,6 +16,12 @@
  *   - il borne par construction : plafond dur de 2000 caracteres par resume avec
  *     troncature VISIBLE, 50 derniers messages par emetteur, rotation a 8 Mio,
  *     deduplication par identite ('<de>:<seq>'), jamais par texte ;
+ *   - il n'injecte QUE ce que le PROPRIETAIRE de l'arbre accepte : la politique
+ *     d'injection lui appartient (outil 'channel_subscribe', ou la cle de
+ *     configuration 'injectKinds'), elle ne porte QUE sur les kinds non
+ *     reveillants ('decouverte', 'avancement') — un 'question', un 'resultat' ou
+ *     un 'echec' passe TOUJOURS, meme sous un filtre vide — et un message filtre
+ *     est STOCKE quand meme, marque 'filtered: true', et tirable (regle 6) ;
  *   - il borne la LIVRAISON, jamais l'ECRITURE : deux bourses SEPAREES, celle du
  *     bruit (2 par emetteur ET 4 par arbre et par 300 s, kinds 'decouverte' et
  *     'avancement') et celle du SIGNAL (3 par arbre et par 300 s, kinds 'question',
@@ -44,7 +50,10 @@
  * ('plugin-data/dsh-boost-channel/decisions.jsonl') :
  *   posted, read, read_refused, delivered, wake_sent, wake_refused,
  *   wake_pending (jauge : messages en attente d'arret), truncated, deduped,
- *   throttled (messages livres a ZERO) et throttled_by_sender (par emetteur).
+ *   throttled (messages livres a ZERO) et throttled_by_sender (par emetteur),
+ *   filtered (messages refuses par la POLITIQUE du destinataire) et
+ *   filtered_by_kind (par kind), subscribe_refused (politique demandee par un
+ *   non-proprietaire).
  */
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -73,6 +82,8 @@ export const KINDS = ['decouverte', 'avancement', 'question', 'resultat', 'echec
 export const POST_ARGUMENTS = ['kind', 'summary', 'target', 'revision', 'verdict', 'payloadRef']
 /** Les cles que la SURFACE de 'channel_read' accepte — et rien d'autre. */
 export const READ_ARGUMENTS = ['since', 'kinds', 'only_unread']
+/** Les cles que la SURFACE de 'channel_subscribe' accepte — et rien d'autre. */
+export const SUBSCRIBE_ARGUMENTS = ['inject']
 /** Fenetre du limiteur de cadence. */
 export const WAKE_WINDOW_MS = 120000
 /** Au plus UN reveil par enfant et par fenetre. */
@@ -290,6 +301,67 @@ export function isWakeEligible(kind) {
  */
 export function deliveryPurseOf(kind) {
   return isWakeEligible(kind) ? 'reserved' : 'ordinary'
+}
+
+/**
+ * Les kinds ORDINAIRES : ceux qui ne reveillent personne, donc les SEULS que la
+ * politique du destinataire peut filtrer (CANAL §5, regle 6).
+ */
+export const ORDINARY_KINDS = KINDS.filter((kind) => !WAKE_KINDS.includes(kind))
+
+/**
+ * Une politique d'injection : ce que le PROPRIETAIRE accepte de voir pousser
+ * dans son contexte.
+ *
+ * 'null' = PERMISSIF, le defaut : tout ce qui n'a pas ete exclu est injecte, donc
+ * rien ne change pour qui ne regle rien. Un 'Set' vide = le filtre le plus
+ * restrictif possible — et il ne peut PAS atteindre un kind reveillant (voir
+ * 'filtersKind').
+ *
+ * @param value - la valeur declaree : 'undefined'/'null' (permissif), ou une
+ *   liste de kinds. Toute autre chose LEVE : une politique qu'on devine est pire
+ *   qu'une politique qui s'abstient, et l'appelant d'un outil peut lire l'erreur.
+ * @returns 'null' ou un 'Set' de kinds ordinaires.
+ */
+export function normaliseInjectFilter(value) {
+  if (value === undefined || value === null) return null
+  if (!Array.isArray(value)) {
+    throw new Error('channel: inject must be a list of kinds, got ' + JSON.stringify(value))
+  }
+  const allowed = new Set()
+  for (const kind of value) {
+    if (typeof kind !== 'string' || !KINDS.includes(kind)) {
+      throw new Error('channel: inject accepts declared kinds only, got ' + JSON.stringify(kind))
+    }
+    // Lister un kind reveillant n'est pas une erreur, c'est un NO-OP : il passe de
+    // toute facon. On ne le garde donc pas, pour que ce que l'outil rend soit
+    // exactement ce qui est injecte.
+    if (!isWakeEligible(kind)) allowed.add(kind)
+  }
+  return allowed
+}
+
+/**
+ * Le message est-il refuse par la politique du destinataire ?
+ *
+ * LA CLAUSE NON NEGOCIABLE : un kind REVEILLANT ('question', 'resultat',
+ * 'echec') passe TOUJOURS, meme sous un filtre vide. Sans elle, l'arbitre
+ * deviendrait un filtre a disparition : le proprietaire qui filtre le bruit
+ * perdrait aussi le signal, et la bourse reservee ne servirait plus a rien.
+ *
+ * @param filter - la politique ('null' = permissive).
+ * @param kind - le kind DECLARE.
+ * @returns vrai si la livraison doit etre refusee.
+ */
+export function filtersKind(filter, kind) {
+  if (filter === null || filter === undefined) return false
+  if (isWakeEligible(kind)) return false
+  return !filter.has(kind)
+}
+
+/** Ce qui est INJECTE sous cette politique, dans l'ordre de 'KINDS'. */
+export function injectedKinds(filter) {
+  return ORDINARY_KINDS.filter((kind) => filter === null || filter === undefined || filter.has(kind))
 }
 
 /**
@@ -749,7 +821,7 @@ export function payloadCharsOf(payloadRef) {
  * Le canal. Toutes les dependances sont injectables : c'est ce qui rend chaque
  * regle testable sans harnais, et ce qui rend les falsifications possibles.
  *
- * @param deps - '{ home, agents, rootOf, factsOf, now, makeMessage, limiter, budget, journal, maxBytes, keep, readLimit }'.
+ * @param deps - '{ home, agents, rootOf, factsOf, now, makeMessage, limiter, budget, injectKinds, journal, maxBytes, keep, readLimit }'.
  */
 export function createChannel(deps = {}) {
   const home = deps.home ?? dshHome()
@@ -767,6 +839,29 @@ export function createChannel(deps = {}) {
   const readLimit = deps.readLimit ?? READ_LIMIT
   const stores = new Map()
   const markers = new Map()
+  /**
+   * LA POLITIQUE D'INJECTION — 'cle de configuration de la ligne : 'injectKinds'.
+   *
+   * Une valeur INVALIDE est journalisee et laisse le defaut PERMISSIF : un montage
+   * ne doit jamais tomber pour un reglage, et l'injection, elle, ne perd rien (le
+   * message reste stocke et tirable). C'est l'inverse de l'outil, qui LEVE : la,
+   * l'appelant est vivant et peut lire l'erreur.
+   */
+  let defaultFilter = null
+  if (deps.injectKinds !== undefined && deps.injectKinds !== null) {
+    try {
+      defaultFilter = normaliseInjectFilter(deps.injectKinds)
+    } catch (error) {
+      journal({
+        step: 'inject-config-invalid',
+        value: JSON.stringify(deps.injectKinds),
+        error: String(error?.message ?? error),
+      })
+    }
+  }
+  /** Politique par ARBRE ('channel_subscribe') : la racine -> 'Set' ou 'null'. */
+  const filters = new Map()
+  const filterFor = (root) => (filters.has(String(root)) ? filters.get(String(root)) : defaultFilter)
   const stats = {
     posted: 0, read: 0, read_refused: 0, delivered: 0, wake_sent: 0, wake_refused: 0, truncated: 0, deduped: 0,
     // 'throttled' compte les messages livres a ZERO par une bourse epuisee, UNE
@@ -775,6 +870,14 @@ export function createChannel(deps = {}) {
     // emetteur si.
     throttled: 0,
     throttled_by_sender: {},
+    // 'filtered' compte les messages refuses par la POLITIQUE DU DESTINATAIRE
+    // (kinds non reveillants seulement) et 'filtered_by_kind' dit lesquels ;
+    // 'subscribe_refused' compte les tentatives de regler la politique sans en
+    // etre le proprietaire. Un message filtre est STOCKE et tirable : on refuse
+    // la livraison, jamais l'ecriture.
+    filtered: 0,
+    filtered_by_kind: {},
+    subscribe_refused: 0,
   }
   /**
    * Les reveils EN ATTENTE D'ARRET : emetteur -> (id du message -> arbre).
@@ -887,6 +990,26 @@ export function createChannel(deps = {}) {
     })
   }
 
+  /**
+   * Le DESTINATAIRE a refuse ce kind : le message est STOCKE quand meme, compte,
+   * et le journal porte le FILTRE EN VIGUEUR — sans lui, un refus serait
+   * indistinguable d'un canal muet.
+   *
+   * @param envelope - l'enveloppe, deja stockee.
+   * @param filter - la politique en vigueur pour cet arbre.
+   */
+  function countFiltered(envelope, filter) {
+    stats.filtered++
+    stats.filtered_by_kind[envelope.kind] = (stats.filtered_by_kind[envelope.kind] ?? 0) + 1
+    journal({
+      step: 'filtered',
+      id: envelope.id,
+      from: envelope.from,
+      kind: envelope.kind,
+      inject: injectedKinds(filter),
+    })
+  }
+
   /** Livre au proprietaire. Un echec de livraison ne perd jamais le message. */
   function deliver(owner, method, envelope) {
     try {
@@ -913,9 +1036,15 @@ export function createChannel(deps = {}) {
    *     ('decouverte', 'avancement') est livre dans le contexte du proprietaire,
    *     sans ouvrir de tour ;
    *   - 'throttled' : la bourse de son kind est epuisee. Le message est STOCKE et
-   *     tirable, mais rien n'est appele — et le champ 'budget' dit pourquoi.
+   *     tirable, mais rien n'est appele — et le champ 'budget' dit pourquoi ;
+   *   - 'filtered' : la POLITIQUE DU DESTINATAIRE refuse ce kind. Meme traitement
+   *     que 'throttled' (stocke, marque, tirable) : on refuse la livraison, jamais
+   *     l'ecriture. Les kinds reveillants ne sont JAMAIS filtrables.
    * Le depot ne consomme JAMAIS le limiteur de cadence : le limiteur mord a la
    * re-evaluation, pas ici.
+   *
+   * LE CONTENU AUSSI EST REGLE, par le DESTINATAIRE : 'decouverte' et 'avancement'
+   * ne sont injectes que si le proprietaire de l'arbre les accepte.
    *
    * LA LIVRAISON, ELLE, EST BORNEE — jamais l'ecriture. Une injection puise dans
    * la bourse ORDINAIRE ('decouverte', 'avancement') et un message eligible
@@ -995,6 +1124,13 @@ export function createChannel(deps = {}) {
     } else if (owner === undefined) {
       stats.wake_refused++
       wake = 'no-owner'
+    } else if (filtersKind(filterFor(root), kind)) {
+      // LA POLITIQUE DU DESTINATAIRE. Elle prime sur la borne de volume : c'est un
+      // refus EXPLICITE et il porte sur le CONTENU, pas sur le nombre. Elle ne
+      // touche que les kinds non reveillants ('filtersKind'), et le message est
+      // STOCKE quand meme — marque par la MEME append.
+      envelope.filtered = true
+      wake = 'filtered'
     } else if (budget.ordinary.remaining(from, envelope.to) <= 0) {
       envelope.throttled = true
       wake = 'throttled'
@@ -1013,7 +1149,9 @@ export function createChannel(deps = {}) {
     stats.posted++
     if (clipped.truncated) stats.truncated++
     const throttled = envelope.throttled === true
+    const filtered = envelope.filtered === true
     if (throttled) countThrottled(envelope, deliveryPurseOf(kind))
+    if (filtered) countFiltered(envelope, filterFor(root))
     if (eligible) {
       markPending(from, id, root, seat)
     } else if (wake === 'none') {
@@ -1028,7 +1166,7 @@ export function createChannel(deps = {}) {
         wake = 'inject-failed'
       }
     }
-    counters('post', { id, kind, state, to: envelope.to, wake, throttled, truncated: clipped.truncated, chars: Array.from(clipped.summary).length })
+    counters('post', { id, kind, state, to: envelope.to, wake, throttled, filtered, truncated: clipped.truncated, chars: Array.from(clipped.summary).length })
     return { id, state, duplicate: false, wake, budget: budget.snapshot(from, envelope.to) }
   }
 
@@ -1196,10 +1334,49 @@ export function createChannel(deps = {}) {
     return page.map((row) => ({ ...row }))
   }
 
+  /**
+   * LA POLITIQUE DU DESTINATAIRE — reglable EN COURS DE VOL (regle 6, « le
+   * destinataire peut dire stop »).
+   *
+   * Seul le PROPRIETAIRE de l'arbre decide : c'est son contexte qui est en jeu, et
+   * un enfant qui pourrait regler la politique de son proprietaire pourrait faire
+   * disparaitre ce que ses freres disent. Un non-proprietaire est REFUSE, compte
+   * ('subscribe_refused', ligne 'subscribe-refused') et sa reponse ne change RIEN
+   * — meme forme que 'read_refused', ou un refus silencieux serait indistinguable
+   * d'un canal muet.
+   *
+   * @param input - '{ from?, root?, inject }' : 'inject' est la liste des kinds a
+   *   injecter ('[]' = plus aucun kind ordinaire ; 'null' = permissif).
+   * @returns '{ inject, refused, why }' — ce qui est desormais injecte.
+   */
+  function subscribe(input = {}) {
+    const caller = typeof input.from === 'string' && input.from !== '' ? input.from : null
+    const scoped = typeof input.root === 'string' && input.root !== '' ? input.root : null
+    if (caller === null && scoped === null) {
+      throw new Error('channel: subscribe without a subscribing session')
+    }
+    const root = scoped ?? (rootOf(caller) ?? caller)
+    const owner = caller === null || caller === root
+    if (!owner) {
+      stats.subscribe_refused++
+      const kept = injectedKinds(filterFor(root))
+      journal({ step: 'subscribe-refused', from: caller, root: safeKey(root), why: 'not-owner' })
+      counters('subscribe', { root: safeKey(root), refused: true, inject: kept })
+      return { inject: kept, refused: true, why: 'not-owner' }
+    }
+    const filter = normaliseInjectFilter(input.inject)
+    filters.set(String(root), filter)
+    const inject = injectedKinds(filter)
+    counters('subscribe', { root: safeKey(root), from: caller === null ? null : safeKey(caller), refused: false, inject })
+    return { inject, refused: false, why: '' }
+  }
+
   return {
     post,
     read,
     stopped,
+    subscribe,
+    filterFor,
     stats: () => snapshot(),
     storeFor,
     markersFor,
@@ -1258,7 +1435,8 @@ export function buildTools(channel) {
         + 'ton ECRITURE : 2 avancements ou decouvertes par 300 s et par emetteur (4 par arbre), et 3 questions, resultats '
         + 'ou echecs par arbre et par 300 s. La reponse porte budget { ordinary, reserved } : lis-le, et tais-toi quand il '
         + 'tombe a 0 — un message non livre n est PAS perdu (il est stocke, marque throttled, et le proprietaire peut le '
-        + 'tirer). Les seuls arguments lus sont '
+        + 'tirer). Le PROPRIETAIRE de ton arbre peut en plus refuser un kind non reveillant (channel_subscribe) : ta '
+        + 'reponse vaut alors wake=filtered, et le message reste stocke et tirable. Les seuls arguments lus sont '
         + 'kind, summary, target, revision, verdict, payloadRef ; tout autre est ignore et journalise. Rend l id.',
       parameters: {
         type: 'object',
@@ -1280,7 +1458,7 @@ export function buildTools(channel) {
             id: { type: 'string', description: 'Id du message : <session>:<seq> dans ton arbre.' },
             state: { type: 'string', description: 'Etat DERIVE par le runtime.' },
             duplicate: { type: 'boolean', description: 'Vrai si cet id etait deja stocke.' },
-            wake: { type: 'string', description: 'Verdict du depot : pending (reveil differe a ton arret) | injected | throttled (bourse epuisee : stocke, non livre) | no-owner | self | inject-failed | none (doublon).' },
+            wake: { type: 'string', description: 'Verdict du depot : pending (reveil differe a ton arret) | injected | throttled (bourse epuisee : stocke, non livre) | filtered (refuse par la politique du proprietaire : stocke, non livre) | no-owner | self | inject-failed | none (doublon).' },
             budget: {
               type: 'object',
               description: 'Restant des DEUX bourses de livraison apres ce depot : ordinary (decouverte, avancement) et reserved (question, resultat, echec). A 0, le prochain message de cette bourse sera stocke mais non livre.',
@@ -1315,7 +1493,8 @@ export function buildTools(channel) {
         + 'l arbre obtient donc une page vide — la lecture est refusee, comptee, et ne marque RIEN comme lu. Rend '
         + 'au plus 10 enveloppes, les plus recentes, et les marque lues. Chaque enveloppe porte l id, l emetteur, '
         + 'le kind declare, l etat derive, la cible et la revision du verdict, le resume borne, le CHEMIN de la '
-        + 'charge utile et sa taille. Le contenu n est jamais transporte : ouvre payloadRef toi-meme. Les seuls '
+        + 'charge utile et sa taille. Le contenu n est jamais transporte : ouvre payloadRef toi-meme. Un message que ta '
+        + 'politique a refuse (channel_subscribe) est ICI, comme les autres : tu peux toujours le tirer. Les seuls '
         + 'arguments lus sont since, kinds et only_unread ; tout autre est ignore et journalise.',
       parameters: {
         type: 'object',
@@ -1345,6 +1524,54 @@ export function buildTools(channel) {
         // pas lire a la place d'un autre — le controle de destinataire tient.
         const envelopes = channel.read({ ...declaredArguments(channel, 'channel_read', args, READ_ARGUMENTS), from })
         return { count: envelopes.length, envelopes }
+      },
+    },
+    {
+      name: 'channel_subscribe',
+      description: 'Regle ce que TU acceptes de voir pousse dans TON contexte : tu es le proprietaire de l arbre, et '
+        + 'ce reglage ne porte QUE sur les kinds non reveillants (decouverte, avancement). Les kinds reveillants '
+        + '(question, resultat, echec) passent TOUJOURS, meme sous un filtre vide : un filtre ne peut pas les faire '
+        + 'disparaitre, sinon le bruit ferait taire le signal. Un message refuse n est PAS perdu : il est stocke, '
+        + 'marque filtered, et tu le tires avec channel_read. inject=[] n injecte plus aucun kind ordinaire ; '
+        + 'inject=["decouverte","avancement"] remet le defaut permissif. Seul le proprietaire de l arbre peut appeler '
+        + 'cet outil : un enfant est refuse, compte, et sa demande ne change rien. Le seul argument lu est inject ; '
+        + 'tout autre est ignore et journalise. Rend ce qui est desormais injecte.',
+      parameters: {
+        type: 'object',
+        properties: {
+          inject: {
+            type: 'array',
+            items: { type: 'string', enum: KINDS },
+            description: 'Les kinds a injecter dans ton contexte. Une liste vide n injecte plus rien ; les kinds reveillants ne sont pas concernes.',
+          },
+        },
+        required: ['inject'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            inject: { type: 'array', items: { type: 'string' }, description: 'Les kinds ORDINAIRES desormais injectes.' },
+            refused: { type: 'boolean', description: 'Vrai si l appelant n est pas le proprietaire de l arbre.' },
+            why: { type: 'string', description: 'Motif du refus, chaine vide si l appel est accepte.' },
+          },
+          required: ['inject', 'refused', 'why'],
+        },
+        render: (_args, value) => [{
+          type: 'text',
+          text: 'channel_subscribe injecte=' + (value.inject ?? []).join(',')
+            + (value.refused === true ? ' REFUSE (' + value.why + ')' : ''),
+        }],
+      },
+      execute: async (args, exec) => {
+        const from = exec?.agent?.session?.id
+        if (typeof from !== 'string' || from === '') {
+          throw new Error('channel_subscribe: aucune session appelante — la politique appartient a un arbre.')
+        }
+        // Meme frontiere que les deux autres outils : 'root' et 'from' ne sont pas
+        // de la surface, donc un enfant ne peut pas regler l'arbre d'un autre.
+        return channel.subscribe({ ...declaredArguments(channel, 'channel_subscribe', args, SUBSCRIBE_ARGUMENTS), from })
       },
     },
   ]
@@ -1392,6 +1619,9 @@ export function apply(ctx, config = {}) {
     maxBytes: config.maxBytes,
     keep: config.keep,
     readLimit: config.readLimit,
+    // La politique d'injection par defaut de cet arbre : meme endroit que les
+    // autres reglages de la ligne. Absente = PERMISSIVE.
+    injectKinds: config.injectKinds,
   })
 
   try {

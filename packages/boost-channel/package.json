@@ -2,7 +2,7 @@
   "name": "@local/dsh-boost-channel",
   "version": "0.1.0",
   "private": true,
-  "description": "Return channel of Boost mode: an append-only, per-tree JSONL store of STRUCTURED envelopes (never the payload), five declared kinds against four runtime-derived states, a wake policy in which a question whose derived state is running does not wake anyone, a delivery budget that bounds the NUMBER of deliveries per sender and per tree while never refusing storage, and the health counters defined before the first line.",
+  "description": "Return channel of Boost mode: an append-only, per-tree JSONL store of STRUCTURED envelopes (never the payload), five declared kinds against four runtime-derived states, a wake policy in which a question whose derived state is running does not wake anyone, a delivery budget that bounds the NUMBER of deliveries per sender and per tree while never refusing storage, a per-tree injection policy owned by the RECIPIENT (channel_subscribe / injectKinds) that can never filter a waking kind, and the health counters defined before the first line.",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",

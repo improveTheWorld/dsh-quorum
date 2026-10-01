@@ -12,7 +12,7 @@ Le canal entre un enfant et le proprietaire de son arbre. Specification complete
 
 Une enveloppe STRUCTUREE, jamais la charge utile (D13) :
 
-    { id, from, at, kind, state, to, target, revision, verdict, summary, payloadRef, payloadChars, truncated, throttled?, wake_pending? }
+    { id, from, at, kind, state, to, target, revision, verdict, summary, payloadRef, payloadChars, truncated, throttled?, filtered?, wake_pending? }
 
 | champ | sens |
 |---|---|
@@ -26,6 +26,7 @@ Une enveloppe STRUCTUREE, jamais la charge utile (D13) :
 | 'truncated' | vrai des que le resume a ete coupe |
 | 'wake_pending' | present SEULEMENT sur un message dont le reveil attend l'arret de l'emetteur. Absent = rien n'attend |
 | 'throttled' | present SEULEMENT sur un message que la bourse de son kind n'a pas pu livrer : il est STOCKE et tirable, mais il ne sera pas livre. Absent = rien n'a ete refuse |
+| 'filtered' | present SEULEMENT sur un message que la POLITIQUE DU DESTINATAIRE a refuse (kinds non reveillants seulement) : STOCKE et tirable lui aussi. Absent = le destinataire n'a rien exclu |
 
 ## La politique de reveil (§4) — decidee a l'ARRET, jamais au depot
 
@@ -244,19 +245,65 @@ depot, remplacer 'ORDINARY_PER_TREE = 4' par 'Number.POSITIVE_INFINITY', puis la
 depots rendent 'injected' la ou le cinquieme doit rendre 'throttled'. Mesure : 39 cas sur 42 passent
 dans cette copie, et T-J3 et T-J7 tombent avec T-J2 — les trois cas qui tiennent la borne d'arbre.
 
+## La politique du destinataire : le CONTENU est regle par celui qui le recoit
+
+Le proprietaire pouvait filtrer ce qu'il **tire** ('channel_read' : kind, date, jamais-lu) mais
+subissait tout ce qu'on lui **pousse** : le jeton borne le VOLUME, rien ne bornait le CONTENU. Or la
+regle 6 du §5 dit « le destinataire peut dire stop » — sur la poussee, il ne pouvait pas.
+
+**Elle appartient au DESTINATAIRE** (le proprietaire de l'arbre), jamais a l'emetteur, et elle ne
+porte QUE sur les kinds **non reveillants** : 'decouverte' et 'avancement'.
+
+- **un 'question', un 'resultat' ou un 'echec' passe TOUJOURS, meme sous un filtre vide.** Sans cette
+  clause, l'arbitre deviendrait un filtre a disparition : le proprietaire qui filtre le bruit perdrait
+  aussi le signal, et la bourse reservee ne servirait plus a rien. C'est la condition non negociable,
+  et c'est ce que T-F2 tient ;
+- **un message filtre n'est jamais perdu** : STOCKE, marque 'filtered: true', compte, et tirable par
+  'channel_read'. Meme regle que le jeton : on refuse la livraison, jamais l'ecriture ;
+- **le refus explicite prime sur la borne de volume** : quand les deux refuseraient, la reponse vaut
+  'wake: "filtered"', et les deux compteurs restent separes ;
+- elle s'applique a l'**ARBRE** : c'est la politique du proprietaire, et elle vaut pour tout ce qui
+  est injecte dans cet arbre.
+
+**Deux facons de la regler**, et un defaut **permissif** (rien ne change pour qui ne regle rien) :
+
+1. la **cle de configuration** 'injectKinds' de la ligne du plugin — meme endroit que 'maxBytes',
+   'keep' et 'readLimit'. Absente = permissive ; 'injectKinds: ["decouverte"]' n'injecte plus que les
+   decouvertes. Une valeur invalide est JOURNALISEE ('inject-config-invalid') et laisse le defaut
+   permissif : un montage ne tombe pas pour un reglage, et rien n'est perdu pour autant ;
+2. l'outil **'channel_subscribe({ inject: [...] })'**, qui la rend reglable **en cours de vol**.
+   'inject' est une liste d'AUTORISATION : '[]' n'injecte plus aucun kind ordinaire,
+   '["decouverte","avancement"]' remet le defaut permissif. Lister un kind reveillant n'est pas une
+   erreur, c'est un no-op (il passe de toute facon). L'appel rend ce qui est desormais injecte :
+   '{ inject, refused, why }'.
+
+**Seul le proprietaire de l'arbre peut l'appeler.** Un enfant est REFUSE, compte
+('subscribe_refused', ligne 'subscribe-refused'), et sa demande ne change RIEN — meme forme que
+'read_refused', parce qu'un refus muet se lit comme un reglage applique. Un argument invalide, lui,
+LEVE : une politique qu'on devine est pire qu'une politique qui s'abstient.
+
+**Falsification** (T-F2 doit ECHOUER) : sur une copie jetable hors du depot, retirer la clause « les
+kinds reveillants passent toujours » — elle est tenue en trois points (le garde de 'filtersKind',
+l'ordre des branches de 'post', et le marquage de l'attente) — puis lancer
+'node --test test/channel.test.mjs' : 46 cas sur 47 passent, et T-F2 tombe avec
+'filtered' la ou 'pending' est attendu.
+
 ## Les compteurs de sante (§7), exposes et journalises
 
-Onze lectures, dont une jauge : 'posted', 'read', 'read_refused', 'delivered',
+Quatorze lectures, dont une jauge : 'posted', 'read', 'read_refused', 'delivered',
 'wake_sent', 'wake_refused', 'wake_pending' (messages en attente d'arret),
 'truncated', 'deduped', 'throttled' (messages livres a ZERO par une bourse
-epuisee) et 'throttled_by_sender' (le meme compte, par emetteur : un total ne
-designe pas le brouilleur, un compte par emetteur si). Deux voies :
+epuisee), 'throttled_by_sender' (le meme compte, par emetteur : un total ne
+designe pas le brouilleur, un compte par emetteur si), 'filtered' (messages
+refuses par la POLITIQUE du destinataire), 'filtered_by_kind' (le meme compte, par
+kind) et 'subscribe_refused' (politique demandee par un non-proprietaire). Deux voies :
 
 - **service** : 'ctx.get("boostChannel")' rend l'instance ; sa methode est
   'channel.stats()' (et 'post' / 'read' / 'stopped' pour un appelant de confiance —
   c'est cette voie qui peut nommer un destinataire 'to' ou un magasin 'root') ;
 - **journal** : '$DSH_HOME/plugin-data/dsh-boost-channel/decisions.jsonl', une ligne par
-  decision ('post', 'stop', 'wake-reeval', 'throttled', 'read', 'read-refused',
+  decision ('post', 'stop', 'wake-reeval', 'throttled', 'filtered', 'subscribe',
+  'subscribe-refused', 'inject-config-invalid', 'read', 'read-refused',
   'undeclared-argument') plus un instantane
   '{"step":"stats", ...}' apres chacune. Le journal tourne a 8 Mio et n'echoue jamais —
   un diagnostic qui casse ce qu'il observe est pire que rien.
@@ -277,16 +324,21 @@ de savoir ce qui a deja ete tire ; il est borne lui aussi. **Multi-process** : d
 processus qui ecrivent le meme arbre ne sont pas serialises (voir « ce qui n'est pas
 fait »).
 
-## Les deux outils
+## Les trois outils
 
 - 'channel_post({ kind, summary, target?, revision?, verdict?, payloadRef? })' rend
   '{ id, state, duplicate, wake, budget }'. Un message eligible rend 'wake: "pending"' : le
   reveil se decide a l'arret, pas ici. 'wake: "throttled"' dit que la bourse de ce kind etait
-  epuisee — le message est STOCKE, il n'est pas livre. 'budget' rend le restant des deux
-  bourses, et le texte rendu par l'outil le porte aussi ;
+  epuisee, 'wake: "filtered"' que la politique du proprietaire refuse ce kind — dans les deux
+  cas le message est STOCKE, il n'est pas livre. 'budget' rend le restant des deux bourses,
+  et le texte rendu par l'outil le porte aussi ;
 - 'channel_read({ since?, kinds?, only_unread? })' rend au plus 10 enveloppes **qui
   lui sont adressees**, les plus recentes, et les marque lues. 'since' accepte un id
-  deja lu ou une date ISO.
+  deja lu ou une date ISO. Les messages refuses par la politique sont la, comme les autres :
+  c'est le « tirer, pas pousser » ;
+- 'channel_subscribe({ inject: [...] })' regle ce que le PROPRIETAIRE de l'arbre accepte de voir
+  injecte : '{ inject, refused, why }'. 'inject' est une liste d'autorisation portant sur les kinds
+  non reveillants ; les kinds reveillants passent toujours. Un non-proprietaire est refuse et compte.
 
 Ces listes sont **exhaustives** : toute autre cle de l'appel est ignoree et
 journalisee ('undeclared-argument'). Ni 'to', ni 'root', ni 'from' ne sont de la
@@ -297,7 +349,7 @@ surface.
 Un outil enregistre depuis la portee d'une ligne n'atteint jamais la surface composee
 d'un agent : c'est mesure deux fois et ecrit dans
 'packages/boost-mode/cordis.patch.yml:369-384'. Le canal est donc monte au niveau HOTE
-et installe ses deux outils **dans la surface de chaque agent** depuis un listener
+et installe ses trois outils **dans la surface de chaque agent** depuis un listener
 'agent/created' — le motif de 'packages/detached-jobs/lib/index.js:985-1026'.
 La raison, ici, est la PORTEE DE L'ENREGISTREMENT (un outil enregistre depuis la
 portee d'une ligne n'atteint pas la surface composee) ; ce n'est pas le TAG DE
@@ -315,6 +367,8 @@ lit la surface modele ('schemas(agent)') de l'enfant :
     PROBE-filtre-deny: SURFACE COMPLETE de l enfant: read, channel_post, channel_read
     PROBE-filtre-deny: outils ENREGISTRES pour l enfant (get): channel_post, channel_read
     PROBE-filtre-deny: outils sur la SURFACE MODELE de l enfant (schemas): channel_post, channel_read
+      (mesure ANTERIEURE a 'channel_subscribe' : le troisieme outil s'ajoute a cette surface, et c'est
+       le corps de l'outil — pas sa visibilite — qui refuse un non-proprietaire)
     PROBE-filtre-deny: outils visibles SANS portee (niveau hote): (aucun)
     PROBE-PASS — ...
 
@@ -341,6 +395,10 @@ l'absence de mesure pour une preuve.
   ouvert) ;
 - **la portee du N** (50 par emetteur) n'est pas calibree sur une mesure : c'est une
   valeur de depart, comme le document le demande ;
+- **la politique d'injection vit en memoire** : elle est posee par 'channel_subscribe' dans le
+  processus qui l'a recue, et la cle 'injectKinds' est relue au MONTAGE. Un processus neuf repart donc
+  du defaut de la ligne — meme limite que l'index des attentes ci-dessous, et la politique est un
+  reglage, pas une donnee : rien n'est perdu, un message filtre reste stocke et tirable ;
 - **les places reservees vivent en memoire** : une place est prise au depot et rendue a l'arret, dans
   le processus qui a vu les deux. Un redemarrage les perd — la fenetre de 300 s les expire de toute
   facon — et un second processus n'en voit aucune : meme limite que le multi-process ci-dessous ;

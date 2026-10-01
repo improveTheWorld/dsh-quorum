@@ -18,6 +18,7 @@ import { test } from 'node:test'
 import {
   DELIVERY_WINDOW_MS,
   KEEP_PER_SENDER,
+  ORDINARY_KINDS,
   ORDINARY_PER_SENDER,
   RESERVED_PER_TREE,
   SUMMARY_MAX_CHARS,
@@ -27,8 +28,11 @@ import {
   clipSummary,
   createChannel,
   deriveState,
+  filtersKind,
+  injectedKinds,
   isWakeEligible,
   liveRootOf,
+  normaliseInjectFilter,
   stoppedState,
   wakePolicy,
 } from '../lib/index.js'
@@ -57,7 +61,7 @@ function fakeTree() {
 }
 
 /** Un canal sur un arbre factice, dans un DSH_HOME jetable. */
-function mount({ clock = { at: 0 }, keep, maxBytes, readLimit, limiter } = {}) {
+function mount({ clock = { at: 0 }, keep, maxBytes, readLimit, limiter, injectKinds } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-channel-'))
   const tree = fakeTree()
   const root = tree.add('session-root', 'running')
@@ -77,6 +81,7 @@ function mount({ clock = { at: 0 }, keep, maxBytes, readLimit, limiter } = {}) {
     maxBytes,
     readLimit,
     limiter,
+    injectKinds,
   })
   return { home, tree, root, child, channel, clock }
 }
@@ -407,12 +412,14 @@ test('cadence : au plus 3 reveils par arbre et par 120 s', () => {
   assert.equal(limiter.allow('session-e', 'session-root', 0).ok, false)
 })
 
-// CE CAS A ETE ADAPTE avec le jeton de livraison. Il epinglait l'instantane ENTIER
-// de stats(), donc toute lecture neuve le faisait echouer ; et le troisieme
-// 'avancement' du meme enfant n'est plus injecte — la bourse ordinaire vaut 2 par
-// emetteur et par 300 s. Le message reste STOCKE (la lecture en rend toujours 5),
-// il n'est plus LIVRE : 'delivered' passe de 4 a 3, et 'throttled' apparait.
-test('compteurs : posted/read/read_refused/delivered/wake_sent/wake_refused/wake_pending/truncated/deduped/throttled', () => {
+// CE CAS A ETE ADAPTE deux fois : par le jeton de livraison, puis par la politique
+// d'injection. Il epingle l'instantane ENTIER de stats(), donc toute lecture neuve
+// le fait echouer ; et le troisieme 'avancement' du meme enfant n'est plus injecte
+// — la bourse ordinaire vaut 2 par emetteur et par 300 s. Le message reste STOCKE
+// (la lecture en rend toujours 5), il n'est plus LIVRE : 'delivered' passe de 4 a
+// 3, 'throttled' apparait, et 'filtered'/'subscribe_refused' valent 0 ici (aucune
+// politique posee : le defaut est permissif).
+test('compteurs : posted/read/read_refused/delivered/wake_sent/wake_refused/wake_pending/truncated/deduped/throttled/filtered', () => {
   const { home, child, channel } = mount()
   try {
     channel.post({ from: child.id, kind: 'avancement', summary: 'court' })                 // inject (ordinaire 1/2)
@@ -439,6 +446,9 @@ test('compteurs : posted/read/read_refused/delivered/wake_sent/wake_refused/wake
       deduped: 1,
       throttled: 1,
       throttled_by_sender: { 'session-child': 1 },
+      filtered: 0,
+      filtered_by_kind: {},
+      subscribe_refused: 0,
     })
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -467,7 +477,10 @@ test('les outils sont installes PAR AGENT sur agent/created, jamais depuis la li
     assert.deepEqual(registered, [], 'rien n est installe avant qu un agent existe')
 
     handlers.get('agent/created')({ agent })
-    assert.deepEqual(registered.map((tool) => tool.name), ['channel_post', 'channel_read'])
+    // TROIS outils depuis la politique du destinataire : 'channel_subscribe' est
+    // installe pour tout le monde, et c'est le CORPS qui refuse un non-proprietaire
+    // (un enfant le voit donc dans sa surface, et son appel est compte).
+    assert.deepEqual(registered.map((tool) => tool.name), ['channel_post', 'channel_read', 'channel_subscribe'])
     assert.equal(typeof handlers.get('tools/post-execute'), 'function', 'le suivi des echecs passe par le waterfall')
 
     // Les outils passent par le MEME canal que les tests ci-dessus.
@@ -912,11 +925,11 @@ test('T-B6 : le kind echec est eligible au reveil differe', () => {
   }
 })
 
-test('buildTools rend exactement les deux outils documentes', () => {
+test('buildTools rend exactement les trois outils documentes', () => {
   const { home, channel } = mount()
   try {
-    assert.deepEqual(buildTools(channel).map((tool) => tool.name), ['channel_post', 'channel_read'])
-    const [post, read] = buildTools(channel)
+    assert.deepEqual(buildTools(channel).map((tool) => tool.name), ['channel_post', 'channel_read', 'channel_subscribe'])
+    const [post, read, subscribe] = buildTools(channel)
     assert.deepEqual(post.parameters.required, ['kind', 'summary'])
     assert.deepEqual(post.parameters.properties.kind.enum, ['decouverte', 'avancement', 'question', 'resultat', 'echec'])
     assert.equal(typeof post.output.render, 'function', 'le registre REFUSE un outil sans output.render')
@@ -928,6 +941,11 @@ test('buildTools rend exactement les deux outils documentes', () => {
       [post.output.schema.properties.budget.properties.ordinary.type, post.output.schema.properties.budget.properties.reserved.type],
       ['number', 'number'],
     )
+    // Le reglage du destinataire est un OUTIL, avec sa frontiere d'arguments.
+    assert.deepEqual(subscribe.parameters.required, ['inject'])
+    assert.deepEqual(subscribe.parameters.properties.inject.items.enum, ['decouverte', 'avancement', 'question', 'resultat', 'echec'])
+    assert.equal(typeof subscribe.output.render, 'function', 'le registre REFUSE un outil sans output.render')
+    assert.deepEqual(subscribe.output.schema.required, ['inject', 'refused', 'why'])
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -1158,3 +1176,195 @@ test('T-J7 : throttled et throttled_by_sender, et la ligne de journal correspond
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+// ============================================================================
+// LA POLITIQUE DU DESTINATAIRE — T-F1 a T-F5
+//
+// Le proprietaire pouvait filtrer ce qu'il TIRE (kind, date, jamais-lu) mais
+// subissait tout ce qu'on lui POUSSE : le jeton bornait le VOLUME, rien ne bornait
+// le CONTENU. Or le §5 regle 6 dit « le destinataire peut dire stop » — sur la
+// poussee, il ne pouvait pas.
+//
+// La politique appartient au DESTINATAIRE (le proprietaire de l'arbre), jamais a
+// l'emetteur, et elle ne porte QUE sur les kinds NON REVEILLANTS. La falsification
+// (retirer la clause « les kinds reveillants passent toujours ») fait tomber T-F2,
+// et c'est ecrit dans le README.
+// ============================================================================
+
+/** L'outil de politique, tel que le registre le rendrait. */
+const subscribeTool = (channel) => buildTools(channel).find((tool) => tool.name === 'channel_subscribe')
+/** L'exec d'un appel fait par le PROPRIETAIRE de l'arbre factice. */
+const OWNER_EXEC = { agent: { session: { id: 'session-root' } } }
+
+// T-F1 : le contenu est regle par le destinataire, et un message filtre n'est
+// jamais perdu — meme regle que le jeton.
+test('T-F1 : filtre du proprietaire -> le kind exclu n est PAS injecte, mais STOCKE et TIRABLE', async () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const applied = await subscribeTool(channel).execute({ inject: ['decouverte'] }, OWNER_EXEC)
+    assert.deepEqual(applied, { inject: ['decouverte'], refused: false, why: '' }, 'l appel repond ce qui est desormais injecte')
+    const welcome = channel.post({ from: child.id, kind: 'decouverte', summary: 'vue dans le code' })
+    const excluded = channel.post({ from: child.id, kind: 'avancement', summary: 'etape 12/30' })
+    assert.equal(welcome.wake, 'injected')
+    assert.equal(excluded.wake, 'filtered', 'la politique du DESTINATAIRE refuse ce kind')
+    assert.deepEqual(tree.calls.map((call) => call.method), ['inject'], 'un seul inject : l avancement n entre PAS dans le contexte')
+    // Regle 1 (« tirer, pas pousser ») : le message filtre n'est pas perdu.
+    const stored = channel.storeFor('session-root').load()
+    assert.equal(stored.length, 2, 'les DEUX messages sont stockes')
+    assert.equal(stored[1].filtered, true, 'le marqueur est dans l ENREGISTREMENT, pas seulement en memoire')
+    assert.equal(stored[1].summary, 'etape 12/30')
+    assert.deepEqual(channel.read({ from: 'session-root' }).map((row) => row.kind), ['decouverte', 'avancement'],
+      'le proprietaire TIRE ce qu il a refuse de subir')
+    assert.equal(channel.stats().filtered, 1)
+    assert.equal(channel.stats().delivered, 1, 'un message filtre n est pas une livraison')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-F2 : LA CLAUSE NON NEGOCIABLE. Un filtre vide ne peut pas faire disparaitre le
+// signal : sans elle, l'arbitre deviendrait un filtre a disparition.
+test('T-F2 : inject: [] -> une QUESTION reveille quand meme son proprietaire', async () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const applied = await subscribeTool(channel).execute({ inject: [] }, OWNER_EXEC)
+    assert.deepEqual(applied.inject, [], 'plus AUCUN kind ordinaire n est injecte')
+    const beat = channel.post({ from: child.id, kind: 'avancement', summary: 'bruit' })
+    assert.equal(beat.wake, 'filtered')
+    // LE SIGNAL, sous le filtre le plus restrictif possible.
+    const posted = channel.post({ from: child.id, kind: 'question', summary: 'bloque : quelle cible ?' })
+    assert.equal(posted.wake, 'pending', 'une question n est JAMAIS filtree')
+    assert.equal(posted.budget.reserved, RESERVED_PER_TREE - 1, 'la bourse reservee est intacte')
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.state, 'blocked')
+    assert.equal(report.wake_sent, 1, 'le signal passe malgre un filtre vide')
+    assert.deepEqual(tree.calls.filter((call) => call.method === 'send').map((call) => call.to), ['session-root'])
+    assert.equal(channel.stats().filtered, 1, 'seul le battement a ete filtre')
+    assert.equal(channel.stats().wake_refused, 0)
+    // 'resultat' et 'echec' : meme regle — aucun des trois n'est filtrable.
+    const result = channel.post({ from: child.id, kind: 'resultat', summary: 'fini' })
+    assert.equal(result.wake, 'pending')
+    const stored = channel.storeFor('session-root').load()
+    assert.deepEqual(stored.map((row) => row.kind), ['avancement', 'question', 'resultat'])
+    assert.deepEqual(stored.map((row) => row.filtered === true), [true, false, false])
+    // La clause, en clair, sur les fonctions pures — apres la consequence
+    // observable, pour que la falsification la montre AVANT le detail.
+    assert.deepEqual(ORDINARY_KINDS, ['decouverte', 'avancement'], 'seuls les kinds non reveillants sont filtrables')
+    for (const kind of ['question', 'resultat', 'echec']) {
+      assert.equal(filtersKind(normaliseInjectFilter([]), kind), false, kind + ' passe TOUJOURS')
+    }
+    assert.equal(filtersKind(normaliseInjectFilter([]), 'avancement'), true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-F3 : la politique appartient au PROPRIETAIRE. Un enfant qui l'appelle est
+// refuse, compte, et sa demande ne change rien.
+test('T-F3 : un ENFANT qui appelle la politique est REFUSE, compte, et ne change RIEN', async () => {
+  const { home, child, channel } = mount()
+  try {
+    const refused = await subscribeTool(channel).execute({ inject: [] }, { agent: child })
+    assert.equal(refused.refused, true, 'la politique appartient au proprietaire de l arbre')
+    assert.equal(refused.why, 'not-owner')
+    assert.deepEqual(refused.inject, ['decouverte', 'avancement'], 'la reponse rend la politique EN VIGUEUR, inchangee')
+    assert.equal(channel.stats().subscribe_refused, 1)
+    // Elle n'a PAS bouge : le battement de l enfant est toujours injecte.
+    assert.equal(channel.post({ from: child.id, kind: 'avancement', summary: 'etape 1' }).wake, 'injected')
+    assert.equal(channel.stats().filtered, 0)
+    const journal = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    const line = journal.filter((row) => row.step === 'subscribe-refused')
+    assert.equal(line.length, 1, 'un refus silencieux serait indistinguable d un reglage applique')
+    assert.equal(line[0].from, 'session-child')
+    assert.equal(line[0].why, 'not-owner')
+    // Un argument INVALIDE leve (l'appelant est vivant et peut lire l'erreur) : une
+    // politique qu'on devine est pire qu'une politique qui s'abstient.
+    assert.throws(() => normaliseInjectFilter('avancement'), /must be a list/)
+    assert.throws(() => normaliseInjectFilter(['inconnu']), /declared kinds only/)
+    assert.deepEqual(injectedKinds(normaliseInjectFilter(['question'])), [], 'lister un kind reveillant est un NO-OP')
+    // Le proprietaire, lui, passe : le refus n'a pas ferme la porte.
+    const applied = await subscribeTool(channel).execute({ inject: ['decouverte'] }, OWNER_EXEC)
+    assert.deepEqual(applied, { inject: ['decouverte'], refused: false, why: '' })
+    assert.equal(channel.post({ from: child.id, kind: 'avancement', summary: 'etape 2' }).wake, 'filtered')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-F4 : les compteurs disent COMBIEN et LESQUELS, le journal porte le filtre en
+// vigueur, et le refus du destinataire prime sur la borne de volume.
+test('T-F4 : filtered et filtered_by_kind disent COMBIEN et LESQUELS', async () => {
+  const { home, tree, channel } = mount()
+  try {
+    await subscribeTool(channel).execute({ inject: ['decouverte'] }, OWNER_EXEC)
+    const kids = ['a', 'b', 'c', 'd', 'e'].map((suffix) => tree.add('session-child-' + suffix, 'running', 'session-root'))
+    channel.post({ from: kids[0].id, kind: 'avancement', summary: 'a1' })
+    channel.post({ from: kids[0].id, kind: 'avancement', summary: 'a2' })
+    channel.post({ from: kids[1].id, kind: 'avancement', summary: 'a3' })
+    // Quatre 'decouverte' ACCEPTEES : elles saturent la bourse ordinaire de l arbre.
+    for (const kid of kids.slice(0, 4)) channel.post({ from: kid.id, kind: 'decouverte', summary: 'd ' + kid.id })
+    assert.equal(channel.stats().delivered, 4)
+    assert.equal(channel.stats().throttled, 0, 'un message filtre ne consomme AUCUNE place de bourse')
+    // Les DEUX refuseraient (kind filtre ET arbre sature) : c'est la POLITIQUE qui
+    // est rendue — le refus explicite du destinataire passe avant la borne.
+    const both = channel.post({ from: kids[4].id, kind: 'avancement', summary: 'a4' })
+    assert.equal(both.wake, 'filtered', 'le refus EXPLICITE du destinataire prime sur la borne de volume')
+    assert.equal(channel.stats().filtered, 4)
+    assert.deepEqual(channel.stats().filtered_by_kind, { avancement: 4 }, 'le compte est PAR KIND')
+    assert.equal(channel.stats().throttled, 0)
+    const lines = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    const filtered = lines.filter((row) => row.step === 'filtered')
+    assert.equal(filtered.length, 4, 'une ligne par message filtre')
+    assert.equal(filtered.length, channel.stats().filtered)
+    assert.deepEqual(
+      { id: filtered[0].id, from: filtered[0].from, kind: filtered[0].kind, inject: filtered[0].inject },
+      { id: 'session-child-a:1', from: 'session-child-a', kind: 'avancement', inject: ['decouverte'] },
+      'le journal porte id, from, kind ET le filtre en vigueur',
+    )
+    assert.equal(lines.some((row) => row.step === 'stats' && row.filtered === 4), true, 'l instantane porte le compteur')
+    assert.equal(lines.some((row) => row.step === 'stats' && row.filtered_by_kind?.avancement === 4), true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-F5 : les DEUX facons de regler, et le defaut PERMISSIF : rien ne change pour
+// qui ne regle rien.
+test('T-F5 : sans reglage le defaut est PERMISSIF ; la cle de configuration regle pareil', () => {
+  // (a) aucun reglage.
+  const free = mount()
+  try {
+    assert.equal(free.channel.filterFor('session-root'), null, 'le defaut est permissif')
+    assert.deepEqual(injectedKinds(free.channel.filterFor('session-root')), ['decouverte', 'avancement'])
+    assert.equal(free.channel.post({ from: free.child.id, kind: 'avancement', summary: 'libre' }).wake, 'injected')
+    assert.equal(free.channel.post({ from: free.child.id, kind: 'decouverte', summary: 'libre aussi' }).wake, 'injected')
+    assert.equal(free.channel.stats().filtered, 0)
+    assert.equal(free.channel.stats().subscribe_refused, 0)
+  } finally {
+    rmSync(free.home, { recursive: true, force: true })
+  }
+  // (b) la CLE DE CONFIGURATION de la ligne — meme endroit que maxBytes/keep/readLimit.
+  const configured = mount({ injectKinds: ['decouverte'] })
+  try {
+    assert.deepEqual(injectedKinds(configured.channel.filterFor('session-root')), ['decouverte'])
+    assert.equal(configured.channel.post({ from: configured.child.id, kind: 'avancement', summary: 'non' }).wake, 'filtered')
+    assert.equal(configured.channel.post({ from: configured.child.id, kind: 'decouverte', summary: 'oui' }).wake, 'injected')
+  } finally {
+    rmSync(configured.home, { recursive: true, force: true })
+  }
+  // (c) une valeur INVALIDE est journalisee et laisse le defaut permissif : un
+  //     montage ne tombe pas pour un reglage.
+  const broken = mount({ injectKinds: 'avancement' })
+  try {
+    assert.equal(broken.channel.filterFor('session-root'), null, 'le montage survit au reglage invalide')
+    assert.equal(broken.channel.post({ from: broken.child.id, kind: 'avancement', summary: 'libre' }).wake, 'injected')
+    const lines = readFileSync(join(broken.home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    assert.equal(lines.some((row) => row.step === 'inject-config-invalid'), true, 'le reglage invalide est JOURNALISE')
+  } finally {
+    rmSync(broken.home, { recursive: true, force: true })
+  }
+})
+
