@@ -21,17 +21,19 @@ Rend, pour l'agent **appelant** :
 { inheritedTokens, windowTokens, ratio, forkThresholdRatio, verdict }
 ```
 
-- `inheritedTokens` — la taille de CE QU'UN FORK HERITERAIT : deux vues du **prefixe clos** (jusqu'au
-  **dernier `turn/end`**, la frontiere exacte de `completedTurnPrefix` ; le tour en vol est exclu,
-  parce qu'il n'est pas herite), et l'on garde la **plus grande**. (1) `prefix-usage` : la derniere
-  pression de prompt du fournisseur **avant** la frontiere, lue sur les **evenements** — c'est la
-  source que le fork tranche, et aucune compaction ne peut la retirer. (2) `token-meter` /
-  `context-breakdown` : la somme des noeuds de SURFACE retenus, la plus fine quand rien n'a ete
-  retire. Le maximum n'est pas un confort : une compaction posee **apres** la frontiere retire des
-  noeuds de surface et ramenait la somme a **zero** sur un prefixe de 750 008 tokens — la garde se
-  rouvrait sur le fork qu'elle venait de refuser, fabrique par notre propre compaction differee
-  (cas `T-C9a`). Sous-estimer ouvre la garde, surestimer la ferme un peu tot : entre les deux
-  erreurs, la seconde est la seule qui protege.
+- `inheritedTokens` — la taille de CE QU'UN FORK HERITERAIT : le **prefixe clos** (jusqu'au **dernier
+  `turn/end`**, la frontiere exacte de `completedTurnPrefix` ; le tour en vol est exclu, parce qu'il
+  n'est pas herite), mesure par la **seule API du harnais parametree par un seq d'arret** :
+  `SessionProjectionRegistry.restore(checkpoint, events, baseSeq, header, inheritedEventCount)`
+  (`dsh-session-projection/lib/types/index.d.ts:263`), dont `asOfSeq` vaut le **dernier evenement
+  fourni**. On lui donne `events[0..boundary]` — exactement ce que `completedTurnPrefix` transmet — et
+  l'on somme les trois champs de `contextBreakdown` (`systemTokens + toolsTokens + messageTokens`).
+  **Prouve egal a la taille d'un ENFANT REEL** a trois cuts, dont un apres compaction (cas `T-C10`).
+  Pourquoi pas une somme de **surface vive** : une compaction ne sp.lice que la surface
+  (`dsh-session/lib/index.js:463`), pas le journal — une region remplacee **apres** la frontiere
+  disparait des noeuds retenus, la somme tombait a **zero**, et la garde se rouvrait sur le fork
+  qu'elle venait de refuser. Le repli (ancienne somme de surface) ne sert que si `restore` est absent
+  ou jette, et il est alors **journalise** (`measure-fallback`) : un repli est un aveu, pas une mesure.
 - `windowTokens` — la fenetre du modele de la route. Lue sur la projection `contextPressure`
   (`contextWindow`), et a defaut sur l'evenement durable `request/context` (`data.contextWindow`).
   Jamais codee en dur. Une valeur **implausible** (entier positif sous `MIN_PLAUSIBLE_WINDOW_TOKENS`,
@@ -56,15 +58,26 @@ forke au tour suivant, ou delegue avec subagent_implement et un brief indexe.
 Le refus est journalise (`fork-refused`, avec les deux nombres) et compte. Refuser sans dire pourquoi
 serait pire que ne pas refuser.
 
-### Limite connue : le garde reconnait le fork a son NOM
+### Le garde par PROPRIETE : le fork se reconnait a ce qu'il EST
 
-`subagent_fork` est une **valeur du preset** (`dsh-base/cordis.patch.yml:383-388`, `toolName:
-subagent_fork`), pas une propriete du harnais. **Mesure** : le meme provider monte sous un autre nom
-(`subagent_fork_deep`) passe **sans refus ni trace**. Reconnaitre le fork par son **fournisseur** est
-hors de portee de ce seam : `tools/pre-execute` ne remet que `{ callId, name, arguments, agent, parent,
-signal }` (`dsh-tools/lib/types/index.d.ts:216-242`) — aucun champ de provider. La riposte disponible
-est donc la **configuration** : la cle `forkToolNames`. Un deploiement qui renomme l'outil **doit** la
-declarer, sinon le garde ne garde rien.
+`subagent_fork` est une **valeur du preset** (`dsh-base/cordis.patch.yml:383-388`), pas une propriete
+du harnais : monte sous un autre nom, le meme provider passait **sans refus ni trace** (mesure). Une
+liste de noms ne peut donc pas suffire.
+
+Il existe un seam ou le provider **et** le contexte sont connus tous les deux : `SubagentProvider`
+porte `inheritsParentContext` en **propriete requise** (`dsh-subagent/lib/types/types.d.ts:337`), elle
+vaut `true` exactement pour un fork (`dsh-subagent-fork-in-process/lib/index.js:44`), et
+`start(request)` recoit `request.parent` — l'agent delegant, donc sa session
+(`dsh-subagent-in-process-driver/lib/index.js:164-185`). Le registre publie chaque enregistrement
+(`subagent/provider-added`, `dsh-subagent/lib/index.js:3076-3086`).
+
+La ligne enveloppe donc `start` et `prepareContinuable` des providers qui **heritent** : le controle
+ne depend plus d'un nom, il depend de la propriete qui **definit** le fork. Le refus est une promesse
+rejetee portant le meme message (cas `T-C11`). Si l'enveloppe ne peut pas etre posee (provider gele),
+c'est **journalise** (`provider-guard-unavailable`), jamais suppose.
+
+`forkToolNames` reste comme repli : c'est lui qui donne un refus **propre au seam des outils**
+(`tools/pre-execute`), ou seul le nom est visible, et il sert aux deploiements qui renomment l'outil.
 
 ## 3. La compaction differee
 
@@ -84,7 +97,7 @@ donc encore `running` : la garde attend l'inactivite observee (`agent.whenIdle()
 | cle | defaut | sens |
 |---|---|---|
 | `forkThresholdRatio` | `0.6` | au-dela, le fork est refuse (jamais `-0` : refuse et journalise) |
-| `forkToolNames` | `['subagent_fork']` | les NOMS gardes — voir « Limite connue » |
+| `forkToolNames` | `['subagent_fork']` | les NOMS gardes au seam des outils (repli du garde par propriete) |
 | `home` | `$DSH_HOME` | racine du journal `plugin-data/dsh-boost-context-budget/decisions.jsonl` |
 
 Pourquoi **0,6** : un enfant doit garder ~40 % de la fenetre pour lire, tester et ecrire. Plus haut,
@@ -105,16 +118,20 @@ source unique que lisent le code, les tests et toute sonde : un outil ajoute fai
 node --test packages/boost-context-budget/test/context-budget.test.mjs
 ```
 
-30 cas, T-C1 a T-C9 : la mesure et sa frontiere, le refus et son message, le seuil configurable, la
-compaction differee et son idempotence par tour, le seuil invalide, l'outil lui-meme, et — **T-C8** — la
-**valeur REELLE validee par le REGISTRE** `dsh-tools`. Ce dernier cas existe pour un defaut reel : l'outil
-rendait `sources`, absent du schema de sortie, et le registre rejette toute cle non declaree. Les cas qui
-appellent `tool.execute(...)` directement passent **au-dessus** de cette couture — ils etaient verts quand
-l'outil ne marchait pas. Les cas `T-C9a`..`T-C9e` tiennent les cinq defauts structurels trouves par
-falsification : la compaction posterieure a la frontiere (`T-C9a`, la somme de surface rendait ZERO sur
-un prefixe de 750 008 tokens), le seuil `-0` qui faisait rejeter toute reponse de l'outil (`T-C6`), le
-nom garde qui est une valeur de configuration (`T-C9d`), l'armement d'un refus qui ne doit pas survivre
-a un tour jamais ferme (`T-C9e`), et la fenetre implausible (`T-C9c`).
+32 cas, T-C1 a T-C11. Ceux qui ont decide la conception :
+
+- **T-C10, l'acceptation** : la mesure **egale la taille d'un ENFANT REEL** — une vraie `Session` construite
+  a partir du seed, mesuree par la meme pile (vrai `SessionProjectionRegistry`, vraie projection
+  `contextBreakdown`) — a **trois cuts**, dont un **apres une compaction** posee dans le tour en cours,
+  ou la surface vive du parent s'est effondree. C'est ce cas qui a mis a bas la somme de surface.
+- **T-C8** : la **valeur REELLE validee par le REGISTRE** `dsh-tools`. Il existe pour un defaut reel :
+  l'outil rendait `sources`, absent du schema de sortie, et le registre rejette toute cle non declaree.
+  Les cas qui appellent `tool.execute(...)` directement passent **au-dessus** de cette couture.
+- **T-C11** : le garde par **propriete** (`inheritsParentContext`), qui reconnait le fork meme renomme.
+- `T-C9a`..`T-C9e` tiennent les autres defauts trouves par falsification : la borne du prefixe et
+  l'absence de maximum (`T-C9a`), le repli journalise (`T-C9b`), la fenetre implausible (`T-C9c`), le
+  nom garde configurable (`T-C9d`), l'armement borne par tour (`T-C9e`), et le seuil `-0` refuse
+  (`T-C6`).
 
 ## Sonde
 

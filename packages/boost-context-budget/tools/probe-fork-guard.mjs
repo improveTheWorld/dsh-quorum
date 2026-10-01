@@ -106,6 +106,20 @@ async function main() {
       })
       ctx.provide('sessionProjections', {
         snapshot: () => ({ asOfSeq: 5, values: windowTokens === null ? {} : { contextPressure: { contextWindow: windowTokens } } }),
+        // LA source de la mesure : 'restore' borne a la frontiere. Il rend le
+        // prefixe sous forme de 'contextBreakdown', et il JETTE quand la mesure
+        // est censee etre indisponible — c'est ce qui exerce le repli.
+        restore: (_checkpoint, events) => {
+          if (!meterAvailable) throw new Error('registre indisponible')
+          const tokens = meterNodes.reduce((total, node) => total + (typeof node?.tokens === 'number' ? node.tokens : 0), 0)
+          return {
+            snapshot: {
+              asOfSeq: events.length === 0 ? -1 : events[events.length - 1].seq,
+              values: { contextBreakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: tokens } },
+            },
+            checkpoint: {},
+          }
+        },
       })
       ctx.provide('compaction', {
         compactNow: (agent, signal) => {
@@ -287,7 +301,7 @@ async function main() {
     + ' · verdict=' + (occupancy.value?.verdict ?? '(aucune valeur)')
     + ' · sources=' + JSON.stringify(occupancy.value?.sources ?? null))
   if (occupancy.isError === true) failures.push('le retour REEL de context_occupancy est rejete par le registre : ' + String(occupancy.error?.message))
-  if (occupancy.value?.sources?.inherited !== 'token-meter') failures.push('le retour REEL de context_occupancy ne porte pas ses sources : ' + JSON.stringify(occupancy.value ?? null))
+  if (occupancy.value?.sources?.inherited !== 'restore-boundary') failures.push('le retour REEL de context_occupancy ne porte pas ses sources : ' + JSON.stringify(occupancy.value ?? null))
 
   // ---- Le journal du plugin : la meme histoire, cote production -------------
   const journalFile = join(scratch, 'plugin-data', plugin.name, 'decisions.jsonl')

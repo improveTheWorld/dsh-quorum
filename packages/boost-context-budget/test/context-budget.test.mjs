@@ -36,7 +36,9 @@ import {
   VERDICT_OK,
   VERDICT_REFUSED,
   VERDICT_UNKNOWN,
+  breakdownTotal,
   measure,
+  prefixBreakdownOf,
   resolveThreshold,
 } from '../lib/index.js'
 
@@ -195,8 +197,13 @@ function meterOf(nodes) {
   return { measure: () => ({ nodes }) }
 }
 
-/** Une projection de session : 'snapshot' pour la fenetre, 'stateOf' pour la composition. */
-function projectionsOf({ window, nodes }) {
+/**
+ * Une projection de session : 'snapshot' pour la fenetre, 'stateOf' pour la
+ * composition, et 'restore' — LA source de la mesure — quand le cas la fournit.
+ * Sans 'restore', la mesure prend son REPLI et le journalise : c'est ce que
+ * verifient les cas de repli, pas les autres.
+ */
+function projectionsOf({ window, nodes, restore }) {
   return {
     snapshot: (_session, keys) => {
       assert.deepEqual(keys, ['contextPressure'])
@@ -206,7 +213,28 @@ function projectionsOf({ window, nodes }) {
       if (key !== 'contextBreakdown') return undefined
       return nodes === undefined ? undefined : { nodes, breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 } }
     },
+    ...restore === undefined ? {} : { restore },
   }
+}
+
+/**
+ * Un 'restore' de faux registre : il REND le 'contextBreakdown' qu'on lui donne,
+ * et il RETIENT ce qu'on lui a passe — la seule facon de prouver que la mesure
+ * lui donne bien le prefixe borne.
+ */
+function restoreOf(breakdown, seen = []) {
+  const restore = (checkpoint, events, baseSeq, header, inherited) => {
+    seen.push({ checkpoint, events, baseSeq, header, inherited })
+    return {
+      snapshot: {
+        asOfSeq: events.length === 0 ? -1 : events[events.length - 1].seq,
+        values: { contextBreakdown: breakdown },
+      },
+      checkpoint: {},
+    }
+  }
+  restore.seen = seen
+  return restore
 }
 
 // --------------------------------------------------------------------------- //
@@ -235,7 +263,7 @@ test('T-C1 : le ratio est rendu, et le TOUR EN VOL est exclu du prefixe herite',
   assert.ok(Math.abs(value.ratio - 0.625) < 0.02, 'ratio attendu ~0,625, mesure ' + value.ratio)
   assert.equal(value.forkThresholdRatio, DEFAULT_FORK_THRESHOLD_RATIO)
   assert.equal(value.verdict, VERDICT_REFUSED, '0,625 > 0,6 : un fork serait refuse')
-  assert.equal(value.sources.inherited, 'token-meter')
+  assert.equal(value.sources.inherited, 'fallback-token-meter', 'sans restore, la mesure prend son repli et le DIT')
   assert.equal(value.sources.boundarySeq, 3, 'la frontiere est le dernier turn/end, seq 3')
 })
 
@@ -260,7 +288,7 @@ test('T-C1c : sans meter, la composition contextBreakdown donne le meme prefixe'
     services: { sessionProjections: projectionsOf({ window: 160_000, nodes: [{ seq: 1, heuristicTokens: 60_000 }, { seq: 2, heuristicTokens: 40_000 }, { seq: 5, heuristicTokens: 75_000 }] }) },
   })
   const value = harnessed.controller.measureFor(session)
-  assert.equal(value.sources.inherited, 'context-breakdown')
+  assert.equal(value.sources.inherited, 'fallback-context-breakdown')
   assert.equal(value.inheritedTokens, 100_000)
   assert.equal(value.windowTokens, 160_000)
 })
@@ -742,7 +770,7 @@ test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que exe
   assert.equal(result.value.windowTokens, 100_000)
   assert.equal(result.value.ratio, 0.71)
   assert.equal(result.value.verdict, VERDICT_REFUSED)
-  assert.equal(result.value.sources.inherited, 'token-meter', 'sources doit survivre a la validation du registre')
+  assert.equal(result.value.sources.inherited, 'fallback-token-meter', 'sources doit survivre a la validation du registre')
   assert.equal(result.value.sources.boundarySeq, 3)
   try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
 })
@@ -771,43 +799,66 @@ const COMPACTED_EVENTS = [
   { type: 'user/message', seq: 5, data: { message: 'resume' }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 3 } },
 ]
 
-test('T-C9a : une compaction POSTERIEURE a la frontiere ne remet pas le prefixe a zero', async () => {
+test('T-C9a : la mesure lit le PREFIXE par restore, borne a la frontiere, et ne prend pas le maximum', async () => {
   const session = fakeSession('session-c9a', COMPACTED_EVENTS)
+  // Le registre rend 5 000 tokens pour le prefixe, alors que la surface close en
+  // annonce 70 000 : c'est le RESTORE qui fait foi, meme quand il est plus PETIT.
+  // Un maximum avec une vue fausse fabriquait une valeur fausse.
+  const restore = restoreOf({ systemTokens: 1_000, toolsTokens: 500, messageTokens: 3_500 })
   const harnessed = harness({
     services: {
-      // La surface RETENUE apres compaction : le seul noeud survivant est le
-      // resume, pose a seq 5 — donc AU-DESSUS de la frontiere (seq 3).
-      tokenMeter: meterOf([{ seq: 5, tokens: 1_200 }]),
-      sessionProjections: projectionsOf({ window: 1_000_000 }),
+      tokenMeter: meterOf([{ seq: 1, tokens: 40_000 }, { seq: 2, tokens: 30_000 }]),
+      sessionProjections: projectionsOf({ window: 100_000, restore }),
     },
   })
   const value = harnessed.controller.measureFor(session)
   assert.equal(value.sources.boundarySeq, 3)
-  assert.equal(value.inheritedTokens, 750_008, 'le prefixe du fork est INCHANGE par la compaction')
-  assert.notEqual(value.inheritedTokens, 0, 'une somme de surface ne doit plus pouvoir remettre le prefixe a zero')
-  assert.equal(value.sources.inherited, 'prefix-usage')
-  assert.ok(Math.abs(value.ratio - 0.750008) < 0.01, 'ratio ' + value.ratio)
-  assert.equal(value.verdict, VERDICT_REFUSED)
+  assert.equal(value.inheritedTokens, 5_000, 'la mesure est le contextBreakdown du prefixe rendu par restore')
+  assert.equal(value.sources.inherited, 'restore-boundary')
+  assert.equal(value.ratio, 0.05)
+  assert.equal(value.verdict, VERDICT_OK)
 
-  // Et la garde ne se rouvre pas : c'est le defaut, en une ligne.
-  const decision = await harnessed.preExecute({ name: FORK_TOOL, agent: fakeAgent(session, { status: 'idle' }), arguments: {} })
-  assert.equal(decision.decision.kind, 'deny', 'la garde ne doit PAS se rouvrir apres une compaction')
+  // LA BORNE, prouvee sur ce que 'restore' a RECU : les evenements du prefixe, et
+  // rien apres le dernier turn/end (l'evenement de compaction est a seq 5).
+  assert.equal(restore.seen.length, 1)
+  assert.deepEqual(restore.seen[0].events.map((event) => event.seq), [0, 1, 2, 3])
+  assert.equal(restore.seen[0].baseSeq, 0)
+  assert.deepEqual(restore.seen[0].checkpoint, {})
+  assert.equal(harnessed.controller.stats.measure_fallback, 0, 'restore a servi : AUCUN repli')
+
+  // La garde ne se rouvre pas : c'est le defaut, en une ligne.
+  const refusing = harness({
+    services: {
+      tokenMeter: meterOf([{ seq: 5, tokens: 1_200 }]),
+      sessionProjections: projectionsOf({ window: 1_000_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 750_008 }) }),
+    },
+  })
+  const refusal = await refusing.preExecute({ name: FORK_TOOL, agent: fakeAgent(session, { status: 'idle' }), arguments: {} })
+  assert.equal(refusal.decision.kind, 'deny', 'la garde ne doit PAS se rouvrir apres une compaction')
 })
 
-test('T-C9b : sans compaction, c est la vue la PLUS GRANDE des deux qui gagne', () => {
-  // Les noeuds clos valent 100 000 ; l'usage du fournisseur n'en vaut que 40 000 :
-  // la somme de surface est la vue la plus fine, et c'est elle qui reste.
-  const events = EVENTS.map((event) => event.seq === 2
-    ? { ...event, data: { usage: { inputTokens: 40_000, cacheReadTokens: 0, cacheWriteTokens: 0 } } }
-    : event)
-  const harnessed = harness({
-    services: { tokenMeter: meterOf([{ seq: 1, tokens: 60_000 }, { seq: 2, tokens: 40_000 }]), sessionProjections: projectionsOf({ window: 160_000 }) },
-  })
-  const value = harnessed.controller.measureFor(fakeSession('session-c9b-2', events))
-  assert.equal(value.inheritedTokens, 100_000)
-  assert.equal(value.sources.inherited, 'token-meter')
-  // La session SANS usage reste servie par la meme source : rien n a change.
-  assert.equal(harnessed.controller.measureFor(fakeSession('session-c9b', EVENTS)).inheritedTokens, 100_000)
+test('T-C9b : le repli ne sert QUE si restore manque ou jette, et il est JOURNALISE', () => {
+  const session = fakeSession('session-c9b', EVENTS)
+  const services = (projections) => ({ tokenMeter: meterOf([{ seq: 1, tokens: 60_000 }, { seq: 2, tokens: 40_000 }]), sessionProjections: projections })
+
+  // 1. 'restore' ABSENT : repli, et une ligne de journal qui l'avoue.
+  const absent = harness({ services: services(projectionsOf({ window: 160_000 })) })
+  const withoutRestore = absent.controller.measureFor(session)
+  assert.equal(withoutRestore.inheritedTokens, 100_000)
+  assert.equal(withoutRestore.sources.inherited, 'fallback-token-meter')
+  assert.equal(absent.controller.stats.measure_fallback, 1)
+  assert.equal(entriesOf(absent.dir, 'measure-fallback').length, 1, 'le repli est un AVEU : il se journalise')
+
+  // 2. 'restore' qui JETTE : meme repli, meme journal.
+  const broken = harness({ services: services(projectionsOf({ window: 160_000, restore: () => { throw new Error('registre indisponible') } })) })
+  assert.equal(broken.controller.measureFor(session).sources.inherited, 'fallback-token-meter')
+  assert.equal(entriesOf(broken.dir, 'measure-fallback').length, 1)
+
+  // 3. 'restore' PRESENT : aucun repli, meme quand la surface dit autre chose.
+  const primary = harness({ services: services(projectionsOf({ window: 160_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 12_345 }) })) })
+  assert.equal(primary.controller.measureFor(session).inheritedTokens, 12_345)
+  assert.equal(primary.controller.stats.measure_fallback, 0)
+  assert.equal(entriesOf(primary.dir, 'measure-fallback').length, 0)
 })
 
 test('T-C9c : une fenetre IMPLAUSIBLE rend la mesure inconnue, et la garde s abstient', async () => {
@@ -864,3 +915,144 @@ test('T-C9e : un refus dans un tour qui ne se ferme JAMAIS ne compacte pas un to
   assert.equal(rows[0].armedTurn, 2)
   assert.equal(rows[0].closingTurn, 3)
 })
+
+// --------------------------------------------------------------------------- //
+// T-C10 / T-C11 — l'acceptation contre un ENFANT REEL, et le garde par PROPRIETE //
+// --------------------------------------------------------------------------- //
+
+/**
+ * L'ACCEPTATION. La mesure vaut ce que le fork transmet, prouve contre un ENFANT
+ * REEL : une vraie 'Session' construite a partir du seed ('Session.create(id,
+ * seed, header, inheritedEventCount)', 'dsh-session/lib/types/index.d.ts:155'), et
+ * mesuree par la MEME pile — le vrai 'SessionProjectionRegistry' et la vraie
+ * projection 'contextBreakdown' du 'TokenMeter'.
+ *
+ * Trois cuts, dont un APRES une compaction posee dans le tour en cours : a ce
+ * cut, la surface vive du parent s'est effondree (elle ne contient plus que le
+ * resume), et l'ancienne source y lisait zero.
+ */
+test('T-C10 : la mesure EGALE la taille d un ENFANT REEL, a trois cuts dont un apres compaction', async () => {
+  const modules = harnessModules()
+  const entries = {
+    cordis: join(modules, '@deepseek-ai', 'cordis', 'lib', 'index.js'),
+    projections: join(modules, '@deepseek-ai', 'dsh-session-projection', 'lib', 'index.js'),
+    meter: join(modules, '@deepseek-ai', 'dsh-token-meter', 'lib', 'index.js'),
+    sessions: join(modules, '@deepseek-ai', 'dsh-session', 'lib', 'index.js'),
+  }
+  for (const [label, file] of Object.entries(entries)) {
+    assert.ok(existsSync(file), 'le harnais doit etre installe (' + label + ') : ' + file)
+  }
+  const { Context } = await import(pathToFileURL(entries.cordis).href)
+  const SessionProjections = (await import(pathToFileURL(entries.projections).href)).default
+  const TokenMeter = (await import(pathToFileURL(entries.meter).href)).default
+  const SessionStore = (await import(pathToFileURL(entries.sessions).href)).default
+  const { Session } = await import(pathToFileURL(entries.sessions).href)
+
+  const root = new Context()
+  await root.plugin(SessionProjections)
+  await root.plugin(TokenMeter)
+  await root.plugin(SessionStore)
+  await tick(50)
+  const registry = root.get('sessionProjections')
+  assert.ok(typeof registry?.restore === 'function', 'le registre REEL de projections n a pas ete monte')
+  const services = { sessionProjections: registry }
+
+  // Les formes d'evenements du harnais : source de message, champs de reglement,
+  // marqueurs de surface. C'est ce que le fork rejoue chez l'enfant.
+  const SOURCE = { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' }
+  const APPEND = { surfaceOp: 'append' }
+  const parent = root.sessions.create('session-t10', { meta: { cwd: process.cwd() } })
+  const turn = (n, chars) => {
+    parent.append('turn/start', { turn: n })
+    parent.append('user/message', { id: 'u' + n, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'A'.repeat(chars) }] }, APPEND)
+    parent.append('assistant/message', {
+      message: { id: 'a' + n, role: 'assistant', source: SOURCE, content: [{ type: 'text', text: 'B'.repeat(Math.floor(chars / 2)) }] },
+      usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: chars, cacheWriteTokens: 0 },
+      turn: n, step: 0, stream: [],
+    }, APPEND)
+    parent.append('turn/end', { turn: n, reason: { kind: 'completed' } })
+  }
+  turn(1, 4_000)
+  const cut1 = parent.snapshotEvents().length - 1
+  turn(2, 8_000)
+  const cut2 = parent.snapshotEvents().length - 1
+  turn(3, 12_000)
+  const cut3 = parent.snapshotEvents().length - 1
+  // LA COMPACTION, posee DANS le tour en cours : elle remplace les noeuds 1..9.
+  parent.append('turn/start', { turn: 4 })
+  // Les noeuds de surface ombres sont les MESSAGES : 1,2 (tour 1), 5,6 (tour 2),
+  // 9,10 (tour 3) — les 'turn/start' et 'turn/end' ne portent aucun message.
+  parent.append('user/message', { id: 'u4', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'SUMMARY' }] }, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 10 }, sourceEventSeqs: [1, 2, 5, 6, 9, 10] })
+  const events = parent.snapshotEvents()
+
+  const sizes = []
+  for (const cut of [cut1, cut2, cut3]) {
+    const prefix = events.filter((event) => event.seq <= cut)
+    // L'ENFANT REEL : le seed que 'completedTurnPrefix' transmet.
+    const child = Session.create('child-' + cut, prefix, { ...parent.header, id: 'child-' + cut, isSeeded: true }, prefix.length)
+    const childSize = breakdownTotal(registry.snapshot(child, ['contextBreakdown']).values.contextBreakdown)
+    const measured = prefixBreakdownOf(services, parent, events, cut)
+    // L'EGALITE D'ABORD : c'est elle qui doit rougir quand la source change.
+    assert.equal(measured.tokens, childSize, 'cut ' + cut + ' : la mesure doit EGALER la taille de l enfant reel')
+    assert.equal(measured.source, 'restore-boundary', 'cut ' + cut + ' : la source doit etre le restore borne')
+    sizes.push({ cut, measured: measured.tokens, childSize })
+  }
+  assert.equal(sizes.length, 3)
+  assert.ok(sizes[2].measured > sizes[0].measured, 'le prefixe grandit avec les cuts')
+
+  // La mesure VIVE, apres la compaction, vaut encore celle du prefixe...
+  const live = measure(services, parent, DEFAULT_FORK_THRESHOLD_RATIO)
+  assert.equal(live.inheritedTokens, sizes[2].childSize)
+  assert.equal(live.sources.inherited, 'restore-boundary')
+  // ...et la surface VIVE, elle, s'est effondree : le cas n'est pas vide.
+  const liveSurface = breakdownTotal(registry.snapshot(parent, ['contextBreakdown']).values.contextBreakdown)
+  assert.ok(liveSurface < sizes[2].childSize, 'la surface vive (' + liveSurface + ') doit etre PLUS PETITE que le prefixe (' + sizes[2].childSize + ')')
+  try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
+})
+
+test('T-C11 : le garde par PROPRIETE reconnait le fork sans son nom', async () => {
+  const session = fakeSession('session-c11', EVENTS)
+  const parent = { session }
+  const calls = []
+  const harnessed = harness({
+    services: {
+      tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]),
+      sessionProjections: projectionsOf({ window: 100_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 71_000 }) }),
+    },
+  })
+  // Le provider du fork, monte sous un AUTRE nom : c'est la PROPRIETE qui le
+  // designe ('inheritsParentContext', 'dsh-subagent/lib/types/types.d.ts:337').
+  const renamed = {
+    name: 'fork-sous-un-autre-nom',
+    inheritsParentContext: true,
+    start: (request) => { calls.push('start'); return Promise.resolve({ ok: true }) },
+    prepareContinuable: (request) => { calls.push('prepare'); return Promise.resolve({}) },
+  }
+  harnessed.fire('subagent/provider-added', renamed)
+  assert.equal(harnessed.controller.stats.provider_guarded, 1)
+  await assert.rejects(() => renamed.start({ parent }), /fork refuse/, 'au-dessus du seuil, le provider est refuse')
+  await assert.rejects(() => renamed.prepareContinuable({ parent }), /fork refuse/)
+  assert.deepEqual(calls, [], 'le corps du provider n a PAS tourne : la delegation est refusee')
+  const rows = entriesOf(harnessed.dir, 'fork-refused')
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].seam, 'provider', 'le refus dit par quel seam il est passe')
+
+  // Un provider qui n herite PAS du contexte parent n est pas touche.
+  const spawn = { name: 'spawn', inheritsParentContext: false, start: () => { calls.push('spawn'); return Promise.resolve({}) } }
+  harnessed.fire('subagent/provider-added', spawn)
+  await spawn.start({ parent })
+  assert.deepEqual(calls, ['spawn'])
+
+  // Sous le seuil, le provider garde passe.
+  const passing = harness({
+    services: {
+      tokenMeter: meterOf([{ seq: 1, tokens: 10_000 }]),
+      sessionProjections: projectionsOf({ window: 100_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 10_000 }) }),
+    },
+  })
+  const ok = { name: 'fork', inheritsParentContext: true, start: () => { calls.push('ok'); return Promise.resolve({ ok: true }) } }
+  passing.fire('subagent/provider-added', ok)
+  await ok.start({ parent })
+  assert.deepEqual(calls, ['spawn', 'ok'], 'sous le seuil, la delegation suit son cours')
+})
+

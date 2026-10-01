@@ -310,55 +310,9 @@ export function windowOf(services, session, events) {
   return { windowTokens: null, source: implausible ? 'implausible-window' : 'unavailable' }
 }
 
-/**
- * La pression de PROMPT d'un echantillon d'usage, comme le harnais la calcule
- * ('dsh-token-meter/lib/index.js:387') : entree non cachee + lectures + ecritures
- * de cache. La SORTIE n'en fait pas partie — elle ne grandit pas avec le tour.
- */
-export function promptTokensOf(usage) {
-  if (typeof usage?.inputTokens !== 'number' || !Number.isFinite(usage.inputTokens)) return null
-  const read = typeof usage.cacheReadTokens === 'number' && Number.isFinite(usage.cacheReadTokens) ? usage.cacheReadTokens : 0
-  const write = typeof usage.cacheWriteTokens === 'number' && Number.isFinite(usage.cacheWriteTokens) ? usage.cacheWriteTokens : 0
-  const total = usage.inputTokens + read + write
-  return Number.isFinite(total) && total > 0 ? total : null
-}
-
-/** L'usage porte par un evenement d'assistant : forme durable d'abord, flux ensuite. */
-export function usageOfEvent(event) {
-  if (event?.type !== 'assistant/message' && event?.type !== 'assistant/attempt') return null
-  const direct = promptTokensOf(event.data?.usage)
-  if (direct !== null) return direct
-  const stream = event.data?.stream
-  if (!Array.isArray(stream)) return null
-  for (let index = stream.length - 1; index >= 0; index--) {
-    const record = stream[index]
-    const found = promptTokensOf(record?.usage ?? record?.chunk?.usage)
-    if (found !== null) return found
-  }
-  return null
-}
-
-/**
- * CE QUE LE FORK TRANSMET VRAIMENT : la derniere pression de prompt rapportee par
- * le fournisseur AVANT la frontiere.
- *
- * Mesuree sur les EVENEMENTS du prefixe, jamais sur la surface : une compaction
- * posterieure a la frontiere retire des noeuds de surface, mais elle n'efface
- * aucun evenement — et le fork, lui, tranche des POSITIONS DE JOURNAL
- * ('dsh-subagent-fork-in-process/lib/index.js:23-28'). C'est la seule source
- * qu'une compaction ne peut pas faire disparaitre sous la mesure.
- */
-export function prefixUsageOf(events, boundary) {
-  if (!Array.isArray(events) || boundary < 0) return null
-  let tokens = null
-  for (const event of events) {
-    const seq = event?.seq
-    if (typeof seq !== 'number' || seq > boundary) continue
-    const found = usageOfEvent(event)
-    if (found !== null) tokens = found
-  }
-  return tokens
-}
+// (La vue 'prefix-usage' a ete RETIREE : refutee sur la vraie pile, elle
+// s'arretait au dernier echantillon du fournisseur, donc AVANT les tool/result du
+// tour clos. La mesure est 'prefixBreakdownOf', plus bas.)
 
 /** Le tour OUVERT d'apres le journal, ou null quand il n'est pas lisible. */
 export function openTurnOf(events) {
@@ -372,7 +326,12 @@ export function openTurnOf(events) {
   return turn
 }
 
-/** La surface RETENUE close : le meter d'abord, la composition ensuite. */
+/**
+ * La surface RETENUE close : le meter d'abord, la composition ensuite.
+ *
+ * REPLI SEULEMENT — voir 'inheritedOf'. Elle est fausse vers le bas des qu'une
+ * compaction post-frontiere retire des noeuds, et c'est mesure.
+ */
 function retainedSurfaceOf(services, session, boundary) {
   try {
     const measurement = services.tokenMeter?.measure?.(session)
@@ -391,35 +350,76 @@ function retainedSurfaceOf(services, session, boundary) {
   return null
 }
 
+/** La somme des trois champs de 'contextBreakdown', ou null si la vue manque. */
+export function breakdownTotal(breakdown) {
+  if (breakdown === null || typeof breakdown !== 'object') return null
+  let total = 0
+  for (const field of ['systemTokens', 'toolsTokens', 'messageTokens']) {
+    const value = breakdown[field]
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null
+    total += value
+  }
+  return total
+}
+
 /**
- * La taille de CE QU'UN FORK HERITERAIT — deux vues du MEME prefixe, et l'on
- * garde la PLUS GRANDE.
+ * LA MESURE : ce que le fork transmet, lu sur les EVENEMENTS du prefixe.
  *
- *   1. 'prefix-usage' — la derniere pression de prompt du fournisseur avant la
- *      frontiere, lue sur les EVENEMENTS : c'est la source que le fork tranche,
- *      et aucune compaction posterieure ne peut la retirer ;
- *   2. 'token-meter' / 'context-breakdown' — la somme des noeuds de surface clos.
+ * Source unique : 'SessionProjectionRegistry.restore(checkpoint, events, baseSeq,
+ * header, inheritedEventCount)' ('dsh-session-projection/lib/types/index.d.ts:263')
+ * — la SEULE API du harnais parametree par un seq d'arret, dont 'asOfSeq' vaut le
+ * DERNIER evenement fourni ('dsh-session-projection/lib/index.js:288,314'). On lui
+ * donne exactement ce que le fork tranche ('events[0..boundary]', la frontiere de
+ * 'completedTurnPrefix'), et l'on somme les trois champs de 'contextBreakdown' —
+ * la vue client de cette projection ('dsh-token-meter/lib/index.js:263').
  *
- * POURQUOI LE MAXIMUM, et pas l'une ou l'autre seule. La somme de surface est une
- * vue PLUS PETITE OU EGALE du prefixe des qu'une compaction posterieure a la
- * frontiere retire des noeuds : mesure du verificateur, elle tombe a ZERO sur un
- * prefixe de 750 008 tokens ('{inheritedTokens: 0, ratio: 0, verdict: ok}') et la
- * garde se rouvre sur le fork qu'elle vient de refuser — fabrique par notre propre
- * compaction differee. La pression du fournisseur, elle, est un MINORANT du
- * prefixe : elle precede le dernier message du tour clos. Sous-estimer OUVRE la
- * garde, surestimer la ferme un peu tot ; entre les deux erreurs, la seconde est
- * la seule qui protege. Aucune des deux vues : 'null', on ne devine pas.
+ * POURQUOI PAS LA SURFACE VIVE. Une compaction ne SP.LICE QUE LA SURFACE
+ * ('dsh-session/lib/index.js:463' : 'state.nodes.splice(...)') ; le journal, lui,
+ * ne perd rien ('snapshotEvents()' rend 'this.log'). Une region remplacee APRES la
+ * frontiere disparait donc des noeuds retenus, et toute somme de surface close
+ * s'effondre : mesure du verificateur, 0 contre 541 857 de prefixe reel.
+ *
+ * POURQUOI PAS UN MAXIMUM avec l'ancienne vue : elle est fausse vers le BAS de
+ * facon demontree, et un maximum avec une vue fausse fabrique une valeur fausse.
+ * La vue de surface ne survit que comme REPLI, et seulement quand 'restore' est
+ * absent ou jette — journalise 'measure-fallback', parce qu'un repli est un aveu,
+ * pas une mesure.
+ */
+export function prefixBreakdownOf(services, session, events, boundary) {
+  const registry = services.sessionProjections
+  if (typeof registry?.restore !== 'function') return { tokens: null, source: 'no-restore' }
+  if (!Array.isArray(events)) return { tokens: null, source: 'no-events' }
+  const prefix = []
+  for (const event of events) {
+    const seq = event?.seq
+    if (typeof seq !== 'number' || seq > boundary) continue
+    prefix.push(event)
+  }
+  try {
+    const restored = registry.restore({}, prefix, 0, session?.header, session?.inheritedEventCount ?? 0)
+    const total = breakdownTotal(restored?.snapshot?.values?.contextBreakdown)
+    if (total === null) return { tokens: null, source: 'restore-empty' }
+    return { tokens: total, source: 'restore-boundary' }
+  } catch (error) {
+    return { tokens: null, source: 'restore-failed', error: String(error?.message ?? error) }
+  }
+}
+
+/**
+ * La taille de CE QU'UN FORK HERITERAIT : le prefixe clos, mesure par la meme API
+ * que celle qui parametre un arret — 'restore' borne a la frontiere.
+ *
+ * Le REPLI (somme de surface close, 'fallback-...') ne s'applique QUE si 'restore'
+ * est absent ou jette : c'est un aveu de mesure, journalise 'measure-fallback' par
+ * l'appelant, jamais un second avis qu'on prendrait quand il arrange.
  */
 export function inheritedOf(services, session, boundary, events) {
   if (boundary < 0) return { inheritedTokens: 0, source: 'no-completed-turn' }
-  const prefix = prefixUsageOf(events, boundary)
+  const restored = prefixBreakdownOf(services, session, events, boundary)
+  if (restored.tokens !== null) return { inheritedTokens: restored.tokens, source: restored.source }
   const surface = retainedSurfaceOf(services, session, boundary)
-  if (prefix === null && surface === null) return { inheritedTokens: null, source: 'unavailable' }
-  if (surface === null) return { inheritedTokens: prefix, source: 'prefix-usage' }
-  if (prefix === null) return { inheritedTokens: surface.tokens, source: surface.source }
-  return prefix > surface.tokens
-    ? { inheritedTokens: prefix, source: 'prefix-usage' }
-    : { inheritedTokens: surface.tokens, source: surface.source }
+  if (surface !== null) return { inheritedTokens: surface.tokens, source: 'fallback-' + surface.source, via: restored.source }
+  return { inheritedTokens: null, source: 'unavailable', via: restored.source }
 }
 
 /**
@@ -584,7 +584,7 @@ export function apply(ctx, config = {}) {
   const threshold = resolveThreshold(config.forkThresholdRatio, journal)
   const forkTools = resolveForkTools(config.forkToolNames, journal)
   const guarded = new Set(forkTools)
-  const stats = { measured: 0, refused: 0, passed: 0, compacted: 0, compact_failed: 0, unknown: 0, arm_orphaned: 0, arm_unbounded: 0 }
+  const stats = { measured: 0, refused: 0, passed: 0, compacted: 0, compact_failed: 0, unknown: 0, arm_orphaned: 0, arm_unbounded: 0, measure_fallback: 0, provider_guarded: 0 }
   // Une session dont le tour courant a subi un refus, AVEC LE TOUR. Un booleen ne
   // suffirait pas : l'armement survivrait a un tour qui ne se ferme JAMAIS, et
   // tirerait sur le premier 'turn/end' venu — un tour etranger, sans rapport.
@@ -597,6 +597,11 @@ export function apply(ctx, config = {}) {
     const value = measure(services, session, threshold)
     stats.measured++
     if (value.verdict === VERDICT_UNKNOWN) stats.unknown++
+    // Le repli est un AVEU : quand 'restore' n'a pas servi, ca se journalise.
+    if (typeof value.sources?.inherited === 'string' && value.sources.inherited.startsWith('fallback-')) {
+      stats.measure_fallback++
+      journal({ step: 'measure-fallback', id: safeKey(session?.id ?? '?'), source: value.sources.inherited })
+    }
     return value
   }
 
@@ -702,6 +707,85 @@ export function apply(ctx, config = {}) {
     })
     return { kind: 'deny', reason, info: { name: 'ForkRefused', code: REFUSAL_CODE, reason } }
   })
+
+  // ---- 2bis. LE GARDE PAR PROPRIETE, au seam ou le provider EST connu --------
+  //
+  // 'exec.name === "subagent_fork"' est une VALEUR du preset : le meme provider
+  // monte sous un autre nom passe (mesure). Et le NOM est tout ce que
+  // 'tools/pre-execute' remet ('dsh-tools/lib/types/index.d.ts:216-242').
+  //
+  // Ou le provider ET le contexte sont-ils connus tous les deux ? Sur le provider
+  // lui-meme : 'SubagentProvider.inheritsParentContext' est une PROPRIETE REQUISE
+  // de l'interface ('dsh-subagent/lib/types/types.d.ts:337'), elle vaut 'true'
+  // exactement pour un fork ('dsh-subagent-fork-in-process/lib/index.js:44'), et
+  // 'start(request)' recoit 'request.parent' — l'agent delegant, donc sa session
+  // ('dsh-subagent-in-process-driver/lib/index.js:164-185'). Le registre publie
+  // chaque enregistrement ('subagent/provider-added',
+  // 'dsh-subagent/lib/index.js:3076-3086').
+  //
+  // On enveloppe donc 'start' et 'prepareContinuable' des providers qui heritent :
+  // le controle ne depend plus d'un nom, il depend de la propriete qui DEFNIT le
+  // fork. Le refus est une levee portant le meme message que la garde par outil.
+  const GUARDED = Symbol.for('dsh-boost-context-budget.provider-guarded')
+  const guardProvider = (provider) => {
+    try {
+      if (provider === null || typeof provider !== 'object') return
+      if (provider.inheritsParentContext !== true) return
+      if (provider[GUARDED] === true) return
+      let wrapped = 0
+      for (const method of ['start', 'prepareContinuable']) {
+        const original = provider[method]
+        if (typeof original !== 'function') continue
+        provider[method] = function guardedDelegation(request) {
+          let verdict
+          try {
+            verdict = measureFor(request?.parent?.session)
+          } catch (error) {
+            // Une mesure qui jette ne refuse pas : elle delegue et se journalise.
+            journal({ step: 'provider-guard-failed', error: String(error?.message ?? error) })
+            return original.call(this, request)
+          }
+          if (verdict.ratio !== null && verdict.ratio > threshold) {
+            const reason = refusalMessage(verdict.inheritedTokens, verdict.windowTokens, verdict.ratio, threshold)
+            stats.refused++
+            journal({
+              step: 'fork-refused',
+              seam: 'provider',
+              provider: typeof provider.name === 'string' ? provider.name : null,
+              id: safeKey(request?.parent?.session?.id ?? '?'),
+              inheritedTokens: verdict.inheritedTokens,
+              windowTokens: verdict.windowTokens,
+              ratio: Math.round(verdict.ratio * 10000) / 10000,
+              threshold,
+              sources: verdict.sources,
+            })
+            // Le provider declare rendre une PROMESSE : le refus est donc une
+            // promesse rejetee, jamais une levee synchrone — un appelant qui fait
+            // '.then()' sur 'start' doit voir le refus comme les autres echecs.
+            return Promise.reject(new Error(reason))
+          }
+          return original.call(this, request)
+        }
+        wrapped++
+      }
+      if (wrapped === 0) return
+      Object.defineProperty(provider, GUARDED, { value: true, enumerable: false, configurable: true })
+      stats.provider_guarded++
+      journal({ step: 'provider-guarded', provider: typeof provider.name === 'string' ? provider.name : null, methods: wrapped })
+    } catch (error) {
+      // Un provider gele, ou une propriete non configurable : le garde par nom
+      // reste en place, et l'impossibilite est ECRITE plutot que supposee.
+      journal({ step: 'provider-guard-unavailable', error: String(error?.message ?? error) })
+    }
+  }
+  ctx.on('subagent/provider-added', (provider) => guardProvider(provider))
+  // Les providers DEJA enregistres au montage.
+  try {
+    const subagents = ctx.get('subagents')
+    for (const name of subagents?.list?.() ?? []) guardProvider(subagents.getProvider?.(name))
+  } catch (error) {
+    journal({ step: 'provider-scan-failed', error: String(error?.message ?? error) })
+  }
 
   // ---- 3. La compaction differee, sur 'turn/end' ----------------------------
   //
