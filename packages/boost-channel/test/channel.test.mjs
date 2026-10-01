@@ -16,7 +16,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import {
+  DELIVERY_WINDOW_MS,
   KEEP_PER_SENDER,
+  ORDINARY_PER_SENDER,
+  RESERVED_PER_TREE,
   SUMMARY_MAX_CHARS,
   WakeLimiter,
   apply,
@@ -404,16 +407,21 @@ test('cadence : au plus 3 reveils par arbre et par 120 s', () => {
   assert.equal(limiter.allow('session-e', 'session-root', 0).ok, false)
 })
 
-test('compteurs : posted/read/read_refused/delivered/wake_sent/wake_refused/wake_pending/truncated/deduped', () => {
+// CE CAS A ETE ADAPTE avec le jeton de livraison. Il epinglait l'instantane ENTIER
+// de stats(), donc toute lecture neuve le faisait echouer ; et le troisieme
+// 'avancement' du meme enfant n'est plus injecte — la bourse ordinaire vaut 2 par
+// emetteur et par 300 s. Le message reste STOCKE (la lecture en rend toujours 5),
+// il n'est plus LIVRE : 'delivered' passe de 4 a 3, et 'throttled' apparait.
+test('compteurs : posted/read/read_refused/delivered/wake_sent/wake_refused/wake_pending/truncated/deduped/throttled', () => {
   const { home, child, channel } = mount()
   try {
-    channel.post({ from: child.id, kind: 'avancement', summary: 'court' })                 // inject
+    channel.post({ from: child.id, kind: 'avancement', summary: 'court' })                 // inject (ordinaire 1/2)
     channel.post({ from: child.id, kind: 'question', summary: 'bloque ?' })                // pending
     channel.post({ from: child.id, kind: 'question', summary: 'q'.repeat(5000) })          // pending + tronque
     assert.equal(channel.stats().wake_pending, 2, 'deux reveils en attente d arret')
     channel.stopped(child.id, { why: 'turn/end' })                                         // reveil (1) + cadence (1)
-    channel.post({ from: child.id, kind: 'avancement', summary: 'encore du travail' })     // inject
-    channel.post({ from: child.id, kind: 'avancement', summary: 'dup', id: 'doublon' })    // inject
+    channel.post({ from: child.id, kind: 'avancement', summary: 'encore du travail' })     // inject (ordinaire 2/2)
+    channel.post({ from: child.id, kind: 'avancement', summary: 'dup', id: 'doublon' })    // THROTTLE (2/2 epuise)
     channel.post({ from: child.id, kind: 'avancement', summary: 'dup', id: 'doublon' })    // dedup
     channel.read({ from: 'session-child' })                                                // lecture refusee (non-proprietaire)
     assert.equal(channel.read({ from: 'session-root' }).length, 5)
@@ -421,12 +429,16 @@ test('compteurs : posted/read/read_refused/delivered/wake_sent/wake_refused/wake
       posted: 5,
       read: 5,
       read_refused: 1,
-      delivered: 4,
+      // 1 reveil + 2 injections : le troisieme avancement du meme emetteur n est
+      // plus livre, mais il est STOCKE — la lecture en rend 5, juste au-dessus.
+      delivered: 3,
       wake_sent: 1,
       wake_refused: 1,
       wake_pending: 0,
       truncated: 1,
       deduped: 1,
+      throttled: 1,
+      throttled_by_sender: { 'session-child': 1 },
     })
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -909,6 +921,239 @@ test('buildTools rend exactement les deux outils documentes', () => {
     assert.deepEqual(post.parameters.properties.kind.enum, ['decouverte', 'avancement', 'question', 'resultat', 'echec'])
     assert.equal(typeof post.output.render, 'function', 'le registre REFUSE un outil sans output.render')
     assert.equal(typeof read.output.render, 'function')
+    // Le JETON est declare dans la surface de sortie : il n'est pas seulement
+    // calcule, il est rendu a l'appelant.
+    assert.deepEqual(post.output.schema.required, ['id', 'state', 'duplicate', 'wake', 'budget'])
+    assert.deepEqual(
+      [post.output.schema.properties.budget.properties.ordinary.type, post.output.schema.properties.budget.properties.reserved.type],
+      ['number', 'number'],
+    )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ============================================================================
+// LE JETON DE LIVRAISON — T-J1 a T-J7
+//
+// La taille etait bornee, le NOMBRE ne l'etait pas : un enfant qui postait 200
+// 'avancement' injectait 200 lignes dans le contexte de son proprietaire. Ces cas
+// tiennent la borne, et surtout la regle qui la rend acceptable : ce qui est
+// borne est la LIVRAISON, jamais l'ECRITURE — un message non livre est STOCKE,
+// marque 'throttled', et tirable par 'channel_read'.
+//
+// Chacun de ces cas peut ECHOUER : la falsification (retirer la borne d'arbre)
+// fait tomber T-J2, et c'est ecrit dans le README.
+// ============================================================================
+
+// T-J1 : la borne par emetteur, ET la preuve que rien n'est perdu.
+test('T-J1 : 3 avancements du meme enfant -> le 3e est throttled, mais STOCKE et TIRABLE', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const first = channel.post({ from: child.id, kind: 'avancement', summary: 'etape 1' })
+    const second = channel.post({ from: child.id, kind: 'avancement', summary: 'etape 2' })
+    const third = channel.post({ from: child.id, kind: 'avancement', summary: 'etape 3' })
+    assert.equal(first.wake, 'injected')
+    assert.equal(second.wake, 'injected')
+    assert.equal(third.wake, 'throttled', 'la bourse ordinaire vaut 2 par emetteur et par fenetre')
+    assert.deepEqual(tree.calls.map((call) => call.method), ['inject', 'inject'], 'le 3e n est PAS injecte')
+    // Le restant est rendu a l'appelant, qui peut choisir de se taire.
+    assert.deepEqual([first.budget.ordinary, second.budget.ordinary, third.budget.ordinary], [1, 0, 0])
+    assert.deepEqual([first.budget.reserved, second.budget.reserved, third.budget.reserved], [3, 3, 3],
+      'un avancement ne touche JAMAIS la bourse reservee')
+    // Regle 1 (« tirer, pas pousser ») : le message refuse n'est pas perdu.
+    const stored = channel.storeFor('session-root').load()
+    assert.equal(stored.length, 3, 'les TROIS messages sont stockes')
+    assert.equal(stored[2].throttled, true, 'le marqueur est dans l ENREGISTREMENT, pas seulement en memoire')
+    assert.equal(stored[2].wake_pending, undefined, 'et un avancement ne devient pas eligible pour autant')
+    assert.deepEqual(channel.read({ from: 'session-root' }).map((row) => row.summary), ['etape 1', 'etape 2', 'etape 3'],
+      'le proprietaire TIRE les trois, y compris celui qui n a pas ete livre')
+    assert.equal(channel.stats().throttled, 1)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-J2 : la borne d'ARBRE, et le compteur qui NOMME le refuse. C'est ce cas que la
+// falsification fait tomber : sans la borne d'arbre, les cinq passent.
+test('T-J2 : 5 avancements de 5 enfants differents -> 4 livres au plus, et le refuse est NOMME', () => {
+  const { home, tree, channel } = mount()
+  try {
+    const children = ['a', 'b', 'c', 'd', 'e'].map((suffix) => tree.add('session-child-' + suffix, 'running', 'session-root'))
+    const posted = children.map((child) => channel.post({ from: child.id, kind: 'avancement', summary: 'etape de ' + child.id }))
+    assert.deepEqual(posted.map((row) => row.wake), ['injected', 'injected', 'injected', 'injected', 'throttled'],
+      'chaque enfant n a parle QU UNE fois : c est la borne d ARBRE (4) qui mord')
+    assert.deepEqual(posted.map((row) => row.budget.ordinary), [1, 1, 1, 0, 0])
+    assert.equal(tree.calls.length, 4, 'quatre injections, pas cinq')
+    assert.equal(tree.calls.every((call) => call.method === 'inject' && call.to === 'session-root'), true)
+    assert.equal(channel.stats().throttled, 1)
+    assert.deepEqual(channel.stats().throttled_by_sender, { 'session-child-e': 1 },
+      'le compteur dit QUI a ete refuse — un total ne designe pas le brouilleur')
+    // Rien n est perdu : le cinquieme est stocke, et le proprietaire le tire.
+    assert.equal(channel.storeFor('session-root').load().length, 5)
+    assert.equal(channel.read({ from: 'session-root' }).length, 5)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-J3 : les deux bourses sont SEPAREES. Le bruit sature l'ordinaire ; le signal
+// passe quand meme — c'est la raison d'etre de la reservee.
+test('T-J3 : bourse ordinaire saturee -> une question est LIVREE : le bruit n affame pas le signal', () => {
+  const { home, tree, channel } = mount()
+  try {
+    const children = ['a', 'b', 'c', 'd', 'e'].map((suffix) => tree.add('session-child-' + suffix, 'running', 'session-root'))
+    for (const child of children) channel.post({ from: child.id, kind: 'avancement', summary: 'bruit de ' + child.id })
+    assert.equal(channel.stats().throttled, 1, 'l ordinaire de l arbre est sature : 4 livres, 1 refuse')
+    assert.equal(tree.calls.filter((call) => call.method === 'inject').length, 4)
+    // L'enfant bloque : sa bourse RESERVEE n a pas ete touchee par le bruit.
+    const posted = channel.post({ from: children[0].id, kind: 'question', summary: 'bloque : quelle cible ?' })
+    assert.equal(posted.wake, 'pending')
+    assert.equal(posted.budget.reserved, RESERVED_PER_TREE - 1, 'la reservee est INTACTE : une place reservee, deux restantes')
+    assert.equal(posted.budget.ordinary, 0, 'et l ordinaire, lui, reste sature')
+    const report = channel.stopped(children[0].id, { why: 'turn/end' })
+    assert.equal(report.state, 'blocked')
+    assert.equal(report.wake_sent, 1, 'le signal passe malgre cinq messages de bruit')
+    assert.equal(tree.calls.filter((call) => call.method === 'send').length, 1)
+    assert.equal(channel.stats().wake_refused, 0, 'aucun reveil refuse : le bruit n a rien pris au signal')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-J4 : la reservee est bornee ELLE AUSSI — au depot (la place se reserve) et a
+// la livraison (la place reservee est la seule qui ouvre le reveil). Le limiteur de
+// reveil est PERMISSIF ici : ce qui refuse la quatrieme, c'est la bourse, et rien
+// d'autre — les deux dispositifs ne se confondent pas.
+test('T-J4 : 4 questions d affilee -> la 4e est throttled (bourse reservee bornee)', () => {
+  const { home, tree, child, channel } = mount({ limiter: new WakeLimiter({ now: () => 0, perChild: 99, perTree: 99 }) })
+  try {
+    const posted = [1, 2, 3, 4].map((n) => channel.post({ from: child.id, kind: 'question', summary: 'q' + n }))
+    assert.deepEqual(posted.map((row) => row.budget.reserved), [2, 1, 0, 0])
+    assert.deepEqual(posted.map((row) => row.wake), ['pending', 'pending', 'pending', 'pending'],
+      'un budget epuise ne change PAS le verdict du depot : le reveil se decide a l arret')
+    const stored = channel.storeFor('session-root').load()
+    assert.equal(stored.length, 4, 'les QUATRE questions sont stockees')
+    assert.equal(stored[3].throttled, true)
+    assert.equal(stored[3].wake_pending, true, 'l eligibilite depend du KIND SEUL : la bourse ne la retire pas')
+    assert.equal(channel.stats().throttled, 1)
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.wake_sent, 3, 'trois livraisons reservees')
+    assert.equal(report.wake_refused, 1, 'la quatrieme est refusee par la BOURSE')
+    assert.equal(tree.calls.length, 3)
+    const journal = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    assert.equal(journal.filter((row) => row.step === 'throttled').length, 1)
+    assert.equal(journal.filter((row) => row.step === 'wake-reeval' && row.wake === 'throttled').length, 1,
+      'a l arret, la quatrieme est consommee comme les autres — mais refusee par la bourse')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-J5 : le jeton est VISIBLE et il se recharge. L'horloge est injectee (mount la
+// passe a createChannel ET a DeliveryBudget) : la fenetre est donc simulee par la
+// meme couture que le limiteur de reveil, pas par une attente reelle.
+test('T-J5 : le champ budget DECROIT, et se recharge apres la fenetre', () => {
+  const { home, child, channel, clock } = mount()
+  try {
+    assert.equal(DELIVERY_WINDOW_MS, 300000, 'la fenetre est nommee, exportee et vaut 300 s')
+    assert.deepEqual(channel.post({ from: child.id, kind: 'avancement', summary: 'un' }).budget, { ordinary: ORDINARY_PER_SENDER - 1, reserved: RESERVED_PER_TREE })
+    assert.deepEqual(channel.post({ from: child.id, kind: 'avancement', summary: 'deux' }).budget, { ordinary: 0, reserved: RESERVED_PER_TREE })
+    assert.deepEqual(channel.post({ from: child.id, kind: 'avancement', summary: 'trois' }).budget, { ordinary: 0, reserved: RESERVED_PER_TREE },
+      'un message refuse ne consomme rien de plus')
+    // La reservee ne decroit que sur les kinds qui la puisent.
+    assert.deepEqual(channel.post({ from: child.id, kind: 'question', summary: 'q1' }).budget, { ordinary: 0, reserved: 2 })
+    assert.deepEqual(channel.post({ from: child.id, kind: 'question', summary: 'q2' }).budget, { ordinary: 0, reserved: 1 })
+    // La fenetre est glissante : a une milliseconde de la fin, rien n'est rendu.
+    clock.at += DELIVERY_WINDOW_MS - 1
+    assert.deepEqual(channel.post({ from: child.id, kind: 'avancement', summary: 'presque' }).budget, { ordinary: 0, reserved: 1 })
+    clock.at += 2
+    assert.deepEqual(channel.post({ from: child.id, kind: 'avancement', summary: 'apres' }).budget, { ordinary: ORDINARY_PER_SENDER - 1, reserved: RESERVED_PER_TREE },
+      'les DEUX bourses sont revenues a plein')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-J6 : un budget n'est pas une politique. Il ne promeut RIEN (l'eligibilite
+// depend du kind seul), il ne change pas la table du §4, et il ne touche pas au
+// limiteur de reveil — deux dispositifs distincts.
+test('T-J6 : une bourse epuisee ne promeut rien et ne change pas la politique de reveil', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const noisy = tree.add('session-noisy', 'running', 'session-root')
+    for (let index = 0; index < 5; index++) channel.post({ from: noisy.id, kind: 'avancement', summary: 'bruit ' + index })
+    assert.ok(channel.stats().throttled >= 3, 'l ordinaire de cet enfant est sature')
+    // 1. Un kind NON eligible ne le devient pas parce que sa bourse est vide.
+    const beat = channel.post({ from: noisy.id, kind: 'avancement', summary: 'encore' })
+    assert.equal(beat.wake, 'throttled')
+    assert.equal(channel.storeFor('session-root').load().every((row) => row.wake_pending === undefined), true,
+      'aucun avancement ne porte wake_pending : une bourse ne promeut pas un kind')
+    // 2. Un kind eligible ne perd pas son eligibilite quand la reservee est vide.
+    for (let index = 0; index < RESERVED_PER_TREE; index++) channel.post({ from: child.id, kind: 'echec', summary: 'echec ' + index })
+    const fourth = channel.post({ from: child.id, kind: 'echec', summary: 'echec 3' })
+    assert.equal(fourth.wake, 'pending')
+    assert.equal(fourth.budget.reserved, 0)
+    const mine = channel.storeFor('session-root').load().filter((row) => row.from === child.id)
+    assert.deepEqual(mine.map((row) => row.wake_pending), [true, true, true, true], 'les QUATRE restent eligibles')
+    assert.deepEqual(mine.map((row) => row.throttled === true), [false, false, false, true], 'et un seul est throttled')
+    // 3. La bourse ne consomme AUCUNE place du limiteur de reveil.
+    assert.deepEqual(channel.limiter.window_(channel.limiter.children, child.id), [])
+    assert.deepEqual(channel.limiter.window_(channel.limiter.trees, 'session-root'), [])
+    // 4. La politique elle-meme est inchangee par le budget : la meme table, et
+    //    l'eligibilite toujours par le KIND SEUL.
+    assert.equal(wakePolicy('question', 'blocked'), 'wake')
+    assert.equal(wakePolicy('question', 'done'), 'refuse')
+    assert.equal(wakePolicy('resultat', 'done'), 'wake')
+    assert.equal(isWakeEligible('avancement'), false, 'une bourse vide ne promeut pas un avancement')
+    assert.equal(isWakeEligible('echec'), true, 'et une bourse vide ne retrograde pas un echec')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-J7 : les compteurs disent COMBIEN et QUI, et le journal porte la ligne exigee
+// (id, from, kind, bourse epuisee, restant) — un refus muet serait indistinguable
+// d'un canal vide.
+test('T-J7 : throttled et throttled_by_sender, et la ligne de journal correspondante', () => {
+  const { home, tree, channel } = mount()
+  try {
+    const noisy = tree.add('session-noisy', 'running', 'session-root')
+    const quiet = tree.add('session-quiet', 'running', 'session-root')
+    const extra = tree.add('session-extra', 'running', 'session-root')
+    const last = tree.add('session-last', 'running', 'session-root')
+    channel.post({ from: noisy.id, kind: 'avancement', summary: 'n1' })   // livre (emetteur 1/2)
+    channel.post({ from: noisy.id, kind: 'avancement', summary: 'n2' })   // livre (emetteur 2/2)
+    channel.post({ from: noisy.id, kind: 'avancement', summary: 'n3' })   // THROTTLE (emetteur)
+    channel.post({ from: quiet.id, kind: 'decouverte', summary: 'd1' })   // livre (arbre 3/4)
+    channel.post({ from: extra.id, kind: 'avancement', summary: 'x1' })   // livre (arbre 4/4)
+    const refused = channel.post({ from: last.id, kind: 'avancement', summary: 'x2' })  // THROTTLE (arbre)
+    assert.equal(refused.wake, 'throttled')
+    assert.equal(channel.stats().throttled, 2)
+    assert.deepEqual(channel.stats().throttled_by_sender, { 'session-noisy': 1, 'session-last': 1 })
+    // La bourse RESERVEE alimente les MEMES compteurs : c'est un compteur de
+    // messages livres a zero, pas un compteur d'une seule bourse.
+    const questions = [1, 2, 3, 4].map((n) => channel.post({ from: noisy.id, kind: 'question', summary: 'q' + n }))
+    assert.deepEqual(questions.map((row) => row.wake), ['pending', 'pending', 'pending', 'pending'])
+    const storedQuestions = channel.storeFor('session-root').load().filter((row) => row.kind === 'question')
+    assert.equal(storedQuestions.length, 4)
+    assert.deepEqual(storedQuestions.map((row) => row.throttled === true), [false, false, false, true])
+    assert.equal(channel.stats().throttled, 3)
+    assert.deepEqual(channel.stats().throttled_by_sender, { 'session-noisy': 2, 'session-last': 1 })
+    const lines = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    const throttled = lines.filter((row) => row.step === 'throttled')
+    assert.equal(throttled.length, 3, 'une ligne par message refuse, jamais deux pour le meme')
+    assert.equal(throttled.length, channel.stats().throttled)
+    assert.deepEqual(
+      { id: throttled[0].id, from: throttled[0].from, kind: throttled[0].kind, purse: throttled[0].purse, remaining: throttled[0].remaining },
+      { id: 'session-noisy:3', from: 'session-noisy', kind: 'avancement', purse: 'ordinary', remaining: 0 },
+    )
+    assert.equal(throttled[2].purse, 'reserved', 'la bourse epuisee est NOMMEE dans le journal')
+    assert.equal(throttled[2].remaining, 0)
+    assert.equal(lines.some((row) => row.step === 'stats' && row.throttled === 3), true, 'l instantane porte le compteur')
+    assert.equal(lines.some((row) => row.step === 'stats' && row.throttled_by_sender?.['session-noisy'] === 2), true)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

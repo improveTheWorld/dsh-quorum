@@ -12,7 +12,7 @@ Le canal entre un enfant et le proprietaire de son arbre. Specification complete
 
 Une enveloppe STRUCTUREE, jamais la charge utile (D13) :
 
-    { id, from, at, kind, state, to, target, revision, verdict, summary, payloadRef, payloadChars, truncated, wake_pending? }
+    { id, from, at, kind, state, to, target, revision, verdict, summary, payloadRef, payloadChars, truncated, throttled?, wake_pending? }
 
 | champ | sens |
 |---|---|
@@ -25,6 +25,7 @@ Une enveloppe STRUCTUREE, jamais la charge utile (D13) :
 | 'payloadRef' | un CHEMIN vers la preuve brute — jamais son contenu — et 'payloadChars' sa taille |
 | 'truncated' | vrai des que le resume a ete coupe |
 | 'wake_pending' | present SEULEMENT sur un message dont le reveil attend l'arret de l'emetteur. Absent = rien n'attend |
+| 'throttled' | present SEULEMENT sur un message que la bourse de son kind n'a pas pu livrer : il est STOCKE et tirable, mais il ne sera pas livre. Absent = rien n'a ete refuse |
 
 ## La politique de reveil (§4) — decidee a l'ARRET, jamais au depot
 
@@ -201,17 +202,61 @@ fichiers.
 - deduplication par identite d'id, jamais par texte ;
 - 'payloadRef' refuse une chaine multiligne : un chemin n'a pas de retour a la ligne.
 
+## Le jeton de livraison : le budget appartient au DESTINATAIRE
+
+La taille etait bornee, le NOMBRE ne l'etait pas : le chemin 'inject' livrait sans plafond, et 200
+'avancement' d'un meme enfant injectaient 200 lignes (~26 000 caracteres) dans le contexte de son
+proprietaire — la ressource rare, partagee par tous ses enfants. Deux bourses SEPAREES bornent
+desormais la livraison, chacune par emetteur ET par arbre, sur une fenetre glissante de 300 s :
+
+    ORDINAIRE  decouverte, avancement :  2 / emetteur / 300 s   ET   4 / ARBRE / 300 s
+    RESERVEE   question, resultat, echec:                       3 / ARBRE / 300 s
+
+Quatre nombres et une fenetre, nommes et exportes par le paquet : 'ORDINARY_PER_SENDER',
+'ORDINARY_PER_TREE', 'RESERVED_PER_TREE', 'RESERVED_PER_SENDER' (aucune borne par emetteur sur la
+reservee, et c'est un choix : un enfant bloque atteint toujours son proprietaire quels que soient les
+bavardages de ses freres) et 'DELIVERY_WINDOW_MS'. La plus stricte des deux bornes mord, donc un seul
+enfant tres bavard ne peut pas manger la bourse de l'arbre.
+
+- **la reservee n'est JAMAIS consommee par l'ordinaire** : le bruit ne peut pas affamer le signal ;
+- **ce qui est borne est la LIVRAISON, jamais l'ECRITURE** : un message refuse est STOCKE, marque
+  'throttled: true', et reste tirable par 'channel_read'. Un jeton qui ferait perdre un message serait
+  pire que le bruit qu'il evite ;
+- **le jeton est VISIBLE** : 'channel_post' rend 'budget: { ordinary, reserved }', le restant des deux
+  bourses apres ce depot. Un agent qui le voit peut choisir de se taire ; celui qui l'ignore devient un
+  chiffre. Le champ est aussi rendu dans le TEXTE de l'outil, parce qu'un appelant qui ne passe pas par
+  PTC ne voit que ce texte ;
+- **une place se reserve, puis se rend** : un message eligible ('question', 'resultat', 'echec')
+  reserve sa place des le depot — sa livraison est differee jusqu'a l'arret de son emetteur — et la
+  place est RENDUE quand la livraison n'a pas lieu (retrogradation §6, cadence, destinataire disparu,
+  message evince par la borne par emetteur). Sans cela, un message jamais livre gelerait une place pour
+  toute la fenetre, et le bruit affamerait le signal par la bande ;
+- **ce dispositif est distinct du limiteur de reveil** (1 / enfant / 120 s, 3 / arbre / 120 s) : le
+  limiteur borne la CADENCE des tours ouverts, les bourses bornent la LIVRAISON. Les fusionner ferait
+  dire a l'un des deux autre chose que ce qu'il dit : un reveil refuse par la cadence ne consomme
+  aucune place de bourse, et une bourse epuisee ne consomme aucune place du limiteur ;
+- **une bourse epuisee ne change aucune regle** : l'eligibilite depend du KIND SEUL ('isWakeEligible'),
+  la table du §4 est inchangee, et un 'avancement' refuse n'obtient jamais 'wake_pending'.
+
+**Falsification** (le cas doit ECHOUER quand on retire la borne) : sur une copie jetable hors du
+depot, remplacer 'ORDINARY_PER_TREE = 4' par 'Number.POSITIVE_INFINITY', puis lancer
+'node --test test/channel.test.mjs' dans la copie. T-J2 (5 enfants, 4 livres au plus) tombe : les cinq
+depots rendent 'injected' la ou le cinquieme doit rendre 'throttled'. Mesure : 39 cas sur 42 passent
+dans cette copie, et T-J3 et T-J7 tombent avec T-J2 — les trois cas qui tiennent la borne d'arbre.
+
 ## Les compteurs de sante (§7), exposes et journalises
 
-Neuf lectures, dont une jauge : 'posted', 'read', 'read_refused', 'delivered',
+Onze lectures, dont une jauge : 'posted', 'read', 'read_refused', 'delivered',
 'wake_sent', 'wake_refused', 'wake_pending' (messages en attente d'arret),
-'truncated', 'deduped'. Deux voies :
+'truncated', 'deduped', 'throttled' (messages livres a ZERO par une bourse
+epuisee) et 'throttled_by_sender' (le meme compte, par emetteur : un total ne
+designe pas le brouilleur, un compte par emetteur si). Deux voies :
 
 - **service** : 'ctx.get("boostChannel")' rend l'instance ; sa methode est
   'channel.stats()' (et 'post' / 'read' / 'stopped' pour un appelant de confiance —
   c'est cette voie qui peut nommer un destinataire 'to' ou un magasin 'root') ;
 - **journal** : '$DSH_HOME/plugin-data/dsh-boost-channel/decisions.jsonl', une ligne par
-  decision ('post', 'stop', 'wake-reeval', 'read', 'read-refused',
+  decision ('post', 'stop', 'wake-reeval', 'throttled', 'read', 'read-refused',
   'undeclared-argument') plus un instantane
   '{"step":"stats", ...}' apres chacune. Le journal tourne a 8 Mio et n'echoue jamais —
   un diagnostic qui casse ce qu'il observe est pire que rien.
@@ -235,8 +280,10 @@ fait »).
 ## Les deux outils
 
 - 'channel_post({ kind, summary, target?, revision?, verdict?, payloadRef? })' rend
-  '{ id, state, duplicate, wake }'. Un message eligible rend 'wake: "pending"' : le
-  reveil se decide a l'arret, pas ici ;
+  '{ id, state, duplicate, wake, budget }'. Un message eligible rend 'wake: "pending"' : le
+  reveil se decide a l'arret, pas ici. 'wake: "throttled"' dit que la bourse de ce kind etait
+  epuisee — le message est STOCKE, il n'est pas livre. 'budget' rend le restant des deux
+  bourses, et le texte rendu par l'outil le porte aussi ;
 - 'channel_read({ since?, kinds?, only_unread? })' rend au plus 10 enveloppes **qui
   lui sont adressees**, les plus recentes, et les marque lues. 'since' accepte un id
   deja lu ou une date ISO.
@@ -294,6 +341,11 @@ l'absence de mesure pour une preuve.
   ouvert) ;
 - **la portee du N** (50 par emetteur) n'est pas calibree sur une mesure : c'est une
   valeur de depart, comme le document le demande ;
+- **les places reservees vivent en memoire** : une place est prise au depot et rendue a l'arret, dans
+  le processus qui a vu les deux. Un redemarrage les perd — la fenetre de 300 s les expire de toute
+  facon — et un second processus n'en voit aucune : meme limite que le multi-process ci-dessous ;
+- **les quatre nombres ne sont pas calibres sur une mesure** : 2 / 4 / 3 viennent de la conception
+  (CANAL §5, regle 7) et sont des constantes exportees, pas des reglages etudies ;
 - **le cout du canal** n'est pas instrumente en tokens : seuls les compteurs de volume
   le sont — et la lecture refusee d'un enfant n'est comptee qu'en nombre, pas en
   tentatives distinguees par appelant.

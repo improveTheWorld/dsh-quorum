@@ -110,7 +110,7 @@ confort : c'est la condition de faisabilite du canal.
 
 ---
 
-## 5. Les six regles anti-brouillage
+## 5. Les sept regles anti-brouillage
 
 1. **Tirer, pas pousser** (§2).
 2. **Borne par construction, pas par discipline** : plafond de taille DUR, troncature **visible**
@@ -125,6 +125,33 @@ confort : c'est la condition de faisabilite du canal.
    brouilleur semantique — pire qu'un brouilleur bruyant, parce qu'il est credible.
 6. **Le destinataire peut dire stop** : baisser la verbosite ou la cadence **en cours de vol**, pas
    seulement a la naissance.
+7. **Le budget de LIVRAISON appartient au destinataire** — mesure du 1er octobre. La regle 2 bornait la
+   **taille** ; le **nombre** ne l'etait pas : le chemin `inject` livrait sans plafond, et 200
+   `avancement` d'un meme enfant injectaient 200 lignes (~26 000 caracteres, ~6 500 tokens) dans le
+   contexte de son proprietaire — la ressource rare, partagee par tous ses enfants. Deux bourses
+   **separees**, chacune bornee par emetteur ET par arbre, sur une fenetre glissante de 300 s (les
+   quatre nombres et la fenetre sont des constantes nommees et exportees) :
+
+   ```
+   ORDINAIRE  kinds decouverte, avancement :  2 / emetteur / 300 s   ET   4 / ARBRE / 300 s
+   RESERVEE   kinds question, resultat, echec:                       3 / ARBRE / 300 s
+   ```
+
+   Les deux bornes s'appliquent, la plus stricte mord : un seul enfant tres bavard ne peut pas manger
+   le budget de l'arbre. La bourse reservee **n'est jamais consommee par l'ordinaire** : le bruit ne
+   peut pas affamer le signal, et un enfant bloque atteint toujours son proprietaire.
+
+   Ce qui est borne est la **livraison, jamais l'ecriture** : un message qui ne peut pas etre livre est
+   **stocke quand meme**, marque `throttled: true`, et reste **tirable** par `channel_read`. Un jeton
+   qui ferait perdre un message serait pire que le bruit qu'il evite. `channel_post` rend
+   `budget: { ordinary, reserved }` — le restant des deux bourses — pour que l'appelant puisse
+   **choisir de se taire** : un agent qui le voit peut se discipliner, celui qui l'ignore devient un
+   chiffre.
+
+   Ce dispositif est **separe du limiteur de reveil** (1 / enfant / 120 s, 3 / arbre / 120 s) : celui-ci
+   borne la **cadence des tours ouverts**, celui-la la **livraison**. Un message peut etre livre sans
+   reveiller personne (une injection), et un reveil peut etre refuse par la cadence sans qu'aucune
+   bourse ne soit touchee.
 
 ## 6. La retrogradation — la cle de voute
 
@@ -152,6 +179,21 @@ Deux compteurs supplementaires, **par emetteur et par arbre** : nombre de messag
 **ratio de retrogradation** (messages qui ont demande un reveil et ne l'ont pas obtenu). Un enfant
 qui emet quarante « avancement » la ou son frere en emet trois est un brouilleur — et c'est
 mesurable des le premier jour.
+
+Et les deux compteurs qui rendent le jeton de livraison (regle 7) mesurable :
+
+```
+throttled            messages LIVRES A ZERO : la bourse de leur kind etait epuisee. Un message
+                     refuse est STOCKE, marque 'throttled: true', et reste tirable — le compter
+                     separement de 'delivered' est ce qui distingue « moins livre » de « perdu ».
+throttled_by_sender  le meme compte, PAR EMETTEUR : un total ne designe pas le brouilleur, un
+                     compte par emetteur si.
+```
+
+Chaque refus porte une ligne de journal `{"step":"throttled", id, from, kind, purse, remaining,
+budget}` : la bourse epuisee est **nommee** (`ordinary` ou `reserved`) et le restant est ecrit.
+Une bourse epuisee ne change ni l'eligibilite (elle depend du kind SEUL) ni la politique de reveil :
+elle retire une livraison, jamais une regle.
 
 ---
 
