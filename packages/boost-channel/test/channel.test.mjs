@@ -22,6 +22,7 @@ import {
   ORDINARY_PER_SENDER,
   RESERVED_PER_TREE,
   SUMMARY_MAX_CHARS,
+  TOOL_NAMES,
   WakeLimiter,
   apply,
   buildTools,
@@ -480,7 +481,9 @@ test('les outils sont installes PAR AGENT sur agent/created, jamais depuis la li
     // TROIS outils depuis la politique du destinataire : 'channel_subscribe' est
     // installe pour tout le monde, et c'est le CORPS qui refuse un non-proprietaire
     // (un enfant le voit donc dans sa surface, et son appel est compte).
-    assert.deepEqual(registered.map((tool) => tool.name), ['channel_post', 'channel_read', 'channel_subscribe'])
+    // La liste attendue est la SOURCE UNIQUE exportee par la fabrique, jamais une
+    // liste recopiee ici.
+    assert.deepEqual(registered.map((tool) => tool.name), TOOL_NAMES)
     assert.equal(typeof handlers.get('tools/post-execute'), 'function', 'le suivi des echecs passe par le waterfall')
 
     // Les outils passent par le MEME canal que les tests ci-dessus.
@@ -928,7 +931,12 @@ test('T-B6 : le kind echec est eligible au reveil differe', () => {
 test('buildTools rend exactement les trois outils documentes', () => {
   const { home, channel } = mount()
   try {
-    assert.deepEqual(buildTools(channel).map((tool) => tool.name), ['channel_post', 'channel_read', 'channel_subscribe'])
+    // D2 : UNE SEULE SOURCE DE VERITE. Ce cas compare les outils REELLEMENT
+    // fabriques a la liste exportee : un quatrieme outil ajoute sans mettre
+    // TOOL_NAMES a jour fait rougir la SUITE — pas une sonde que personne ne lance
+    // ('probe-stop.mjs' verifiait encore « deux outils » et sortait en PROBE-FAIL
+    // sans executer une seule mesure).
+    assert.deepEqual(buildTools(channel).map((tool) => tool.name), TOOL_NAMES)
     const [post, read, subscribe] = buildTools(channel)
     assert.deepEqual(post.parameters.required, ['kind', 'summary'])
     assert.deepEqual(post.parameters.properties.kind.enum, ['decouverte', 'avancement', 'question', 'resultat', 'echec'])
@@ -1282,7 +1290,8 @@ test('T-F3 : un ENFANT qui appelle la politique est REFUSE, compte, et ne change
     // politique qu'on devine est pire qu'une politique qui s'abstient.
     assert.throws(() => normaliseInjectFilter('avancement'), /must be a list/)
     assert.throws(() => normaliseInjectFilter(['inconnu']), /declared kinds only/)
-    assert.deepEqual(injectedKinds(normaliseInjectFilter(['question'])), [], 'lister un kind reveillant est un NO-OP')
+    assert.throws(() => normaliseInjectFilter(['question']), /cannot filter/,
+      'lister un kind reveillant LEVE (D3) : ce n etait pas un no-op, ca eteignait la politique ordinaire')
     // Le proprietaire, lui, passe : le refus n'a pas ferme la porte.
     const applied = await subscribeTool(channel).execute({ inject: ['decouverte'] }, OWNER_EXEC)
     assert.deepEqual(applied, { inject: ['decouverte'], refused: false, why: '' })
@@ -1367,4 +1376,144 @@ test('T-F5 : sans reglage le defaut est PERMISSIF ; la cle de configuration regl
     rmSync(broken.home, { recursive: true, force: true })
   }
 })
+
+// ============================================================================
+// ROTATION x IDENTITE x PLACE — T-R1, T-R2, T-R4
+//
+// Mesure du verificateur, revision gelee : 'load()' ne lisait QUE le fichier actif,
+// donc tout ce qu'une rotation venait de renommer disparaissait de la surface de
+// lecture — des messages throttles, « jamais perdus » compris — et la BASE du
+// calcul d'identite disparaissait avec : l'id etait reemis, deux messages DISTINCTS
+// portaient la meme identite (regle 4 tombee), et la place reservee du premier
+// etait ecrasee en silence. Un frere innocent voyait alors sa question refusee,
+// bourse reservee vide, sans qu'aucune livraison reservee n'ait eu lieu — l'etat
+// exact que cette bourse existe pour empecher.
+// ============================================================================
+
+/** Le fichier d'un arbre, dans le DSH_HOME jetable d'un 'mount'. */
+const storeFile = (home) => join(home, 'plugin-data', 'dsh-boost-channel', 'session-root.jsonl')
+
+// T-R1 : la surface lisible est EXACTEMENT ce que le disque porte.
+test('T-R1 : une ROTATION ne fait disparaitre aucun message de la surface de lecture', () => {
+  const { home, child, channel } = mount({ maxBytes: 1200 })
+  try {
+    const ids = []
+    for (let index = 1; index <= 8; index++) {
+      ids.push(channel.post({ from: child.id, kind: 'avancement', summary: 'm' + index + ' ' + 'x'.repeat(180) }).id)
+      if (existsSync(storeFile(home) + '.1')) break
+    }
+    assert.equal(existsSync(storeFile(home) + '.1'), true, 'la rotation a eu lieu : la generation precedente existe')
+    const onDisk = [storeFile(home) + '.1', storeFile(home)]
+      .flatMap((file) => readFileSync(file, 'utf8').split('\n'))
+      .filter((line) => line !== '').map((line) => JSON.parse(line).id)
+    assert.deepEqual(onDisk, ids, 'le disque porte TOUS les messages, dans l ordre')
+    assert.deepEqual(channel.storeFor('session-root').load().map((row) => row.id), onDisk,
+      'load() lit la generation ET le fichier actif, dans l ordre chronologique')
+    const page = channel.read({ from: 'session-root' })
+    assert.deepEqual(page.map((row) => row.id).sort(), ids.slice().sort(), 'channel_read rend ce que le disque porte')
+    // Les messages THROTTLES de la generation precedente sont du lot : c est
+    // exactement ce que « jamais perdu » veut dire.
+    const throttled = page.filter((row) => row.throttled === true)
+    assert.equal(throttled.length >= 1, true, 'la borne par emetteur a bien refuse des messages')
+    assert.equal(channel.stats().throttled, throttled.length, 'et ils sont tous encore la')
+    assert.equal(channel.storeFor('session-root').load().every((row) => onDisk.includes(row.id)), true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-R2 : l'identite ne se reemet pas, une place tenue ne fuit pas, et un frere
+// innocent n'est pas affame.
+test('T-R2 : une rotation ne reemet pas un id, ne perd pas de place, et n affame pas un frere', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const store = channel.storeFor('session-root')
+    const first = channel.post({ from: child.id, kind: 'question', summary: 'q1' })
+    assert.equal(first.id, 'session-child:1')
+    assert.equal(first.budget.reserved, RESERVED_PER_TREE - 1, 'une place reservee')
+    // Rotation FORCEE, sans bruit : le fichier actif devient la generation.
+    store.rotateIfFull(Number.MAX_SAFE_INTEGER)
+    assert.equal(existsSync(storeFile(home) + '.1'), true, 'la rotation a eu lieu')
+    assert.equal(store.load().some((row) => row.id === 'session-child:1'), true, 'le message reste lisible')
+    const second = channel.post({ from: child.id, kind: 'question', summary: 'q2' })
+    assert.equal(second.id, 'session-child:2', 'un id deja emis ne peut PLUS l etre : la marque est monotone')
+    assert.equal(second.budget.reserved, RESERVED_PER_TREE - 2, 'DEUX places reservees, pas une')
+    const seen = store.load()
+    assert.equal(new Set(seen.map((row) => row.id)).size, seen.length, 'aucun id en double dans le magasin')
+    // L'arret decide les DEUX questions ; la cadence en refuse une, et sa place est
+    // RENDUE — la bourse ne fuit pas.
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.evaluated, 2, 'les DEUX attentes sont decidees')
+    assert.equal(report.wake_sent, 1)
+    assert.equal(report.wake_refused, 1)
+    assert.equal(channel.stats().wake_pending, 0)
+    assert.equal(channel.budget.snapshot(child.id, 'session-root').reserved, RESERVED_PER_TREE - 1,
+      'la place de la question refusee par la cadence est RENDUE, la livree reste depensee')
+    // LE FRERE INNOCENT : la reservee doit encore accueillir son signal.
+    const sibling = tree.add('session-sibling', 'running', 'session-root')
+    const innocent = channel.post({ from: sibling.id, kind: 'question', summary: 'bloque aussi' })
+    assert.equal(innocent.wake, 'pending')
+    assert.equal(innocent.budget.reserved, RESERVED_PER_TREE - 2, 'la reservee n a pas ete epuisee par la rotation')
+    assert.equal(channel.stopped(sibling.id, { why: 'turn/end' }).wake_sent, 1, 'le signal du frere passe')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-R4 : une place tenue n'est jamais ecrasee en silence.
+test('T-R4 : une place deja tenue n est JAMAIS ecrasee (collision d identite)', () => {
+  const { home, child, channel } = mount()
+  try {
+    const first = channel.post({ from: child.id, kind: 'question', summary: 'q1', id: 'fixe:1' })
+    assert.equal(first.wake, 'pending')
+    assert.equal(channel.stats().wake_pending, 1)
+    assert.equal(channel.budget.snapshot(child.id, 'session-root').reserved, RESERVED_PER_TREE - 1)
+    // Le message est EVINCE du magasin (l'id explicite est une capacite du SERVICE
+    // INTERNE) : c'est le seul chemin ou une collision peut encore naitre.
+    channel.storeFor('session-root').writeAll([])
+    assert.throws(
+      () => channel.post({ from: child.id, kind: 'question', summary: 'q2', id: 'fixe:1' }),
+      /identity collision/,
+      'un id deja en attente d arret ne peut pas etre reutilise',
+    )
+    // Rien n est perdu : la place du premier est INTACTE, le depot refuse n a rien
+    // consomme et n a rien ecrit.
+    assert.equal(channel.stats().wake_pending, 1)
+    assert.equal(channel.budget.snapshot(child.id, 'session-root').reserved, RESERVED_PER_TREE - 1)
+    assert.equal(channel.storeFor('session-root').load().length, 0)
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.evaluated, 0, 'le message evince n a plus rien a decider')
+    assert.equal(channel.stats().wake_pending, 0)
+    assert.equal(channel.budget.snapshot(child.id, 'session-root').reserved, RESERVED_PER_TREE, 'la place est rendue')
+    const lines = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    assert.equal(lines.some((row) => row.step === 'pending-collision' && row.id === 'fixe:1'), true,
+      'la collision est JOURNALISEE, jamais silencieuse')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-D3 : lister un kind reveillant LEVE. C'etait un piege mesure : 'inject:
+// ["echec"]' rendait 'inject: []' et ETEIGNAIT toute la politique ordinaire d'un
+// appelant qui croyait ne rien changer.
+test('T-D3 : inject:[echec] LEVE — lister un kind reveillant n est pas un no-op', async () => {
+  const { home, child, channel } = mount()
+  try {
+    assert.throws(() => normaliseInjectFilter(['echec']), /cannot filter/, 'un kind reveillant ne se filtre pas')
+    assert.throws(() => normaliseInjectFilter(['question']), /passes TOUJOURS/)
+    assert.throws(() => normaliseInjectFilter(['resultat']), /passes TOUJOURS/)
+    const subscribe = subscribeTool(channel)
+    await assert.rejects(subscribe.execute({ inject: ['echec'] }, OWNER_EXEC), /cannot filter/)
+    // Et la politique n a PAS bouge : c est le piege que ce cas ferme.
+    assert.deepEqual(injectedKinds(channel.filterFor('session-root')), ORDINARY_KINDS)
+    assert.equal(channel.post({ from: child.id, kind: 'decouverte', summary: 'avant' }).wake, 'injected')
+    assert.equal(channel.post({ from: child.id, kind: 'avancement', summary: 'aussi' }).wake, 'injected')
+    assert.equal(channel.stats().filtered, 0, 'aucun kind ordinaire n a ete eteint')
+    assert.equal(channel.stats().subscribe_refused, 0, 'le proprietaire n a pas ete refuse : son appel a LEVE')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 

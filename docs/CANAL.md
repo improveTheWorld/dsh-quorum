@@ -120,6 +120,21 @@ confort : c'est la condition de faisabilite du canal.
    82 abonnements est exactement ce qui arrive quand on croit filtrer sans filtrer.
 4. **Deduplication par identite, jamais par texte** : chaque message porte `{de, seq, at}`. Le
    comptage textuel a ete paye trois fois dans ce projet.
+
+   Deux consequences mesurables, apprises au prix d'un FAIL :
+
+   - **la surface de lecture est tout ce que le disque porte** : une rotation renomme le fichier
+     actif en `<fichier>.1`, et la lecture lit **les deux** (generation puis fichier actif). Ne lire
+     que le fichier actif faisait disparaitre de la surface des messages throttles ou filtres — et
+     « jamais perdu » devenait faux des qu'un fichier tournait. Une reecriture (`writeAll`) ne
+     supprime la generation que si elle vient de la **reintegrer** ;
+   - **un id deja emis ne peut plus l'etre** : la marque est **monotone par emetteur** (et par
+     magasin), jamais recalculee sur une fenetre bornable. L'id est une **identite**, pas un numero
+     de ligne ; le derivant de ce qu'on lit, une rotation faisait reemettre l'id, deux messages
+     DISTINCTS portaient la meme identite, la dedup les confondait, et la **place reservee** du
+     premier etait ecrasee — une place perdue pour toute la fenetre, et la question d'un frere
+     innocent refusee. Une place deja tenue n'est **jamais** ecrasee : collision journalisee
+     (`pending-collision`) et depot **refuse**, avant toute consommation.
 5. **Un message n'est pas une affirmation** : chaque entree porte l'identifiant de
    l'enregistrement qui la prouve. Un canal qui accumule des affirmations invérifiables est un
    brouilleur semantique — pire qu'un brouilleur bruyant, parce qu'il est credible.
@@ -142,6 +157,11 @@ confort : c'est la condition de faisabilite du canal.
    cette clause, l'arbitre deviendrait un **filtre a disparition** : le proprietaire qui filtre le
    bruit perdrait aussi le signal, et la bourse reservee de la regle 7 ne servirait plus a rien. C'est
    la condition non negociable du dispositif, et c'est ce que la falsification de `T-F2` verifie.
+
+   **Les LISTER dans `inject` leve** : ce n'etait pas un no-op. `inject: ["echec"]` rendait
+   `inject: []` et **eteignait toute la politique ordinaire** d'un appelant qui croyait ne rien
+   changer (mesure). Ces kinds passent toujours et ne se filtrent pas ; l'appelant est vivant pour
+   lire l'erreur.
 
    **Un message filtre n'est jamais perdu** : il est **stocke** (comme un message throttle), marque
    `filtered: true`, compte (`filtered`, `filtered_by_kind`) et reste **tirable** par

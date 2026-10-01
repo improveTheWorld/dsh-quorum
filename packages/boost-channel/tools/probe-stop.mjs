@@ -110,7 +110,15 @@ try {
     stops.push(from + ' <- ' + String(meta?.why))
     return realStopped(from, meta)
   }
-  if (tools.size !== 2) throw new Error('les outils ne sont pas installes par agent : ' + [...tools.keys()].join(', '))
+  // SOURCE UNIQUE : la liste vient du plugin lui-meme ('TOOL_NAMES'), jamais d'une
+  // liste recopiee ici. Celle-ci verifiait encore « deux outils » : ce probe
+  // sortait en PROBE-FAIL sans executer une seule mesure, et personne ne l'a vu.
+  const declared = plugin.TOOL_NAMES ?? []
+  const missing = declared.filter((name) => !tools.has(name))
+  if (missing.length > 0 || tools.size !== declared.length) {
+    throw new Error('les outils ne sont pas installes par agent : declares=' + declared.join(', ')
+      + ' · enregistres=' + [...tools.keys()].join(', '))
+  }
   const post = tools.get('channel_post')
   const read = tools.get('channel_read')
 

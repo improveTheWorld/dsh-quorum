@@ -25,9 +25,9 @@
 // vraie application cordis, avec deux portees d'agents liees a une portee de
 // preset, applique le filtre REEL, monte le plugin en ligne HOTE, annonce
 // l'enfant, puis lit 'tools.get(<outil>, <agent>)' — la vue du registre lui-meme.
-// Sortie 0 seulement si les deux outils sont sur la surface de l'enfant dans la
-// composition a filtre 'deny', ABSENTS d'une lecture sans portee (le niveau
-// hote), et si le contre-exemple 'allow' est constate.
+// Sortie 0 seulement si TOUS les outils declares ('TOOL_NAMES' du plugin) sont sur
+// la surface de l'enfant dans la composition a filtre 'deny', ABSENTS d'une lecture
+// sans portee (le niveau hote), et si le contre-exemple 'allow' est constate.
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -43,7 +43,10 @@ const entries = {
 const pluginEntry = process.argv[3] !== undefined
   ? resolve(process.argv[3])
   : fileURLToPath(new URL('../lib/index.js', import.meta.url))
-const TOOLS = ['channel_post', 'channel_read']
+// SOURCE UNIQUE : rempli depuis 'TOOL_NAMES' du plugin, plus bas. Recopiee a la
+// main, cette liste avait deja cesse de mesurer : les lignes 'ENREGISTRES' et
+// 'SURFACE MODELE' ne regardaient que deux noms sur trois.
+let TOOLS = []
 /** Les outils pre-existants du probe : ils servent a prouver que le filtre mord. */
 const FIXTURES = ['write', 'edit', 'read', 'present', 'ask_user_question', 'todo_write', 'subagent']
 const say = (key, value) => console.log('PROBE-' + key + ': ' + value)
@@ -159,6 +162,9 @@ try {
   for (const [label, file] of [...Object.entries(entries), ['plugin', pluginEntry]]) {
     if (!existsSync(file)) throw new Error('le module ' + label + ' n est pas installe ici : ' + file)
   }
+  const pluginForNames = await import(pathToFileURL(pluginEntry).href)
+  TOOLS = pluginForNames.TOOL_NAMES
+  if (!Array.isArray(TOOLS) || TOOLS.length === 0) failures.push('le plugin ne declare aucun outil (TOOL_NAMES) : la mesure ne porterait sur rien')
   const noFilter = await scenario('sans-filtre', undefined, 1)
   if (noFilter.onWorker.length !== TOOLS.length) failures.push('sans filtre, les outils ne sont pas sur la surface de l enfant')
 

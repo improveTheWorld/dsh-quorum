@@ -198,7 +198,10 @@ fichiers.
   CODE ('Array.from'), jamais a un index UTF-16 — un substitut isole tue la session ;
 - les 50 derniers messages **par emetteur** ('KEEP_PER_SENDER'), les plus anciens retires ;
 - rotation a 8 Mio par arbre (couture de test : 'DSH_BOOST_CHANNEL_LOG_MAX_BYTES'),
-  une generation gardee dans '<fichier>.1' ;
+  une generation gardee dans '<fichier>.1' — et la LECTURE lit les DEUX : la surface lisible
+  est exactement ce que le disque porte ;
+- l'identite d'un message n'est JAMAIS reemise : la marque est monotone par emetteur, et une
+  place reservee n'est jamais ecrasee (collision journalisee et depot refuse) ;
 - adressage : un fichier par arbre, ET un destinataire par message, applique a la lecture ;
 - deduplication par identite d'id, jamais par texte ;
 - 'payloadRef' refuse une chaine multiligne : un chemin n'a pas de retour a la ligne.
@@ -273,9 +276,10 @@ porte QUE sur les kinds **non reveillants** : 'decouverte' et 'avancement'.
    permissif : un montage ne tombe pas pour un reglage, et rien n'est perdu pour autant ;
 2. l'outil **'channel_subscribe({ inject: [...] })'**, qui la rend reglable **en cours de vol**.
    'inject' est une liste d'AUTORISATION : '[]' n'injecte plus aucun kind ordinaire,
-   '["decouverte","avancement"]' remet le defaut permissif. Lister un kind reveillant n'est pas une
-   erreur, c'est un no-op (il passe de toute facon). L'appel rend ce qui est desormais injecte :
-   '{ inject, refused, why }'.
+   '["decouverte","avancement"]' remet le defaut permissif. **Lister un kind reveillant LEVE** —
+   ce n'etait pas un no-op : 'inject: ["echec"]' rendait 'inject: []' et ETEIGNAIT toute la
+   politique ordinaire d'un appelant qui croyait ne rien changer (mesure). L'appel rend ce qui est
+   desormais injecte : '{ inject, refused, why }'.
 
 **Seul le proprietaire de l'arbre peut l'appeler.** Un enfant est REFUSE, compte
 ('subscribe_refused', ligne 'subscribe-refused'), et sa demande ne change RIEN — meme forme que
@@ -285,8 +289,40 @@ LEVE : une politique qu'on devine est pire qu'une politique qui s'abstient.
 **Falsification** (T-F2 doit ECHOUER) : sur une copie jetable hors du depot, retirer la clause « les
 kinds reveillants passent toujours » — elle est tenue en trois points (le garde de 'filtersKind',
 l'ordre des branches de 'post', et le marquage de l'attente) — puis lancer
-'node --test test/channel.test.mjs' : 46 cas sur 47 passent, et T-F2 tombe avec
-'filtered' la ou 'pending' est attendu.
+'node --test test/channel.test.mjs' : UN SEUL cas tombe, T-F2, avec 'filtered' la ou 'pending' est
+attendu (le compte exact suit la taille de la suite, il n'est pas fige ici).
+
+## Ce qui est sur le disque est ce qui se LIT (rotation x identite x place)
+
+Mesure du verificateur sur la revision gelee : 'load()' ne lisait que le fichier ACTIF. Trois
+consequences, toutes mesurees :
+
+1. **les messages throttles ou filtres disparaissaient** de la surface des qu'une rotation renommait
+   le fichier — « jamais perdu » etait faux des qu'un fichier tournait ; 'writeAll' supprimait en plus
+   la generation '.1' sans l'avoir reintegree ;
+2. **une place reservee fuyait definitivement** : l'id etait recalcule sur le seul fichier actif, donc
+   reemis apres une rotation, et 'markPending' ecrasait en silence la place du message precedent —
+   perdue pour toute la fenetre ;
+3. **la bourse reservee pouvait etre videe a zero** sans qu'aucune livraison reservee n'ait eu lieu, et
+   la 'question' d'un frere innocent etait refusee : l'etat exact que cette bourse existe pour
+   empecher.
+
+Trois regles, tenues par T-R1, T-R2 et T-R4 :
+
+- **la lecture lit la generation ET le fichier actif**, dans l'ordre chronologique : rien de ce qui a
+  ete ecrit ne disparait de la surface de lecture ;
+- **'writeAll' ne supprime '.1' que s'il l'a reintegree** ('merged') : sinon il ne le touche pas. La
+  borne 'KEEP_PER_SENDER' s'applique a l'ensemble FUSIONNE, jamais au seul fichier actif ;
+- **l'identite est monotone** : une marque haute par emetteur (et par magasin) vit en memoire, comme
+  l'index des attentes, et ne redescend jamais — l'id est une IDENTITE, pas un numero de ligne ;
+- **une place tenue n'est jamais ecrasee** : si un id est deja en attente d'arret, la collision est
+  journalisee ('pending-collision') et le depot est REFUSE, avant toute consommation. Rien n'est
+  consomme, rien n'est ecrit, la place du premier est intacte.
+
+**Falsification** (T-R1 doit ECHOUER) : sur une copie jetable hors du depot, remettre la lecture du
+SEUL fichier actif dans 'load()' (rendre 'this.readLines(this.file)' sans concatener '.1'), puis
+lancer 'node --test test/channel.test.mjs' : T-R1 tombe, la lecture ne rend plus que la generation
+vivante.
 
 ## Les compteurs de sante (§7), exposes et journalises
 
@@ -319,7 +355,8 @@ La metrique qui decide si le canal EST du bruit reste le rapport 'delivered / re
 Le chemin rapide APPEND une ligne. La seule reecriture est celle qu'exigent la borne
 par emetteur (retirer les plus anciens du meme emetteur) et la consommation d'un
 reveil differe (le meme enregistrement passe a 'wake_pending: false' avec l'etat
-re-derive). Le fichier des marques de lecture existe parce que 'only_unread' a besoin
+re-derive). Une reecriture n'efface la generation '<fichier>.1' que si elle vient de
+la LIRE ('load' fusionne, 'writeAll' ne supprime que ce qu'il a reintegre). Le fichier des marques de lecture existe parce que 'only_unread' a besoin
 de savoir ce qui a deja ete tire ; il est borne lui aussi. **Multi-process** : deux
 processus qui ecrivent le meme arbre ne sont pas serialises (voir « ce qui n'est pas
 fait »).
@@ -343,6 +380,12 @@ fait »).
 Ces listes sont **exhaustives** : toute autre cle de l'appel est ignoree et
 journalisee ('undeclared-argument'). Ni 'to', ni 'root', ni 'from' ne sont de la
 surface.
+
+La liste des outils est exportee par le paquet ('TOOL_NAMES') et c'est la **source unique** : la
+fabrique, les deux sondes et la suite la lisent. Un quatrieme outil ajoute sans elle fait rougir un
+cas de la suite — pas une sonde que personne ne lance. Mesure : 'probe-stop.mjs' verifiait encore
+« deux outils » et sortait en PROBE-FAIL sans executer une seule mesure, pendant que
+'probe-mount.mjs' n'inspectait que deux noms sur trois.
 
 ## Le montage : une ligne HOTE, des outils installes PAR AGENT — mesure
 

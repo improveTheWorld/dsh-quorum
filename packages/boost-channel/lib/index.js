@@ -318,9 +318,14 @@ export const ORDINARY_KINDS = KINDS.filter((kind) => !WAKE_KINDS.includes(kind))
  * restrictif possible — et il ne peut PAS atteindre un kind reveillant (voir
  * 'filtersKind').
  *
+ * LISTER UN KIND REVEILLANT LEVE. Ce n'est pas un no-op : 'inject: ["echec"]' a
+ * ETEINT toute la politique ordinaire d'un appelant qui croyait ne rien changer
+ * (mesure) — le piege exact que ce garde ferme. Ces kinds passent toujours et ne
+ * se filtrent pas ; une politique qu'on devine est pire qu'une politique qui
+ * s'abstient, et l'appelant d'un outil est vivant pour lire l'erreur.
+ *
  * @param value - la valeur declaree : 'undefined'/'null' (permissif), ou une
- *   liste de kinds. Toute autre chose LEVE : une politique qu'on devine est pire
- *   qu'une politique qui s'abstient, et l'appelant d'un outil peut lire l'erreur.
+ *   liste de kinds NON REVEILLANTS. Toute autre chose LEVE.
  * @returns 'null' ou un 'Set' de kinds ordinaires.
  */
 export function normaliseInjectFilter(value) {
@@ -333,10 +338,14 @@ export function normaliseInjectFilter(value) {
     if (typeof kind !== 'string' || !KINDS.includes(kind)) {
       throw new Error('channel: inject accepts declared kinds only, got ' + JSON.stringify(kind))
     }
-    // Lister un kind reveillant n'est pas une erreur, c'est un NO-OP : il passe de
-    // toute facon. On ne le garde donc pas, pour que ce que l'outil rend soit
-    // exactement ce qui est injecte.
-    if (!isWakeEligible(kind)) allowed.add(kind)
+    // Un kind reveillant n'est pas filtrable : le lister ETEINDRAIT toute la
+    // politique ordinaire (la liste ne contiendrait plus que lui, et lui passe de
+    // toute facon). On LEVE, avec un message qui dit pourquoi.
+    if (isWakeEligible(kind)) {
+      throw new Error('channel: inject cannot filter ' + kind
+        + ' — a waking kind passes TOUJOURS; list decouverte | avancement instead')
+    }
+    allowed.add(kind)
   }
   return allowed
 }
@@ -345,7 +354,9 @@ export function normaliseInjectFilter(value) {
  * Le message est-il refuse par la politique du destinataire ?
  *
  * LA CLAUSE NON NEGOCIABLE : un kind REVEILLANT ('question', 'resultat',
- * 'echec') passe TOUJOURS, meme sous un filtre vide. Sans elle, l'arbitre
+ * 'echec') passe TOUJOURS, meme sous un filtre vide — et 'normaliseInjectFilter'
+ * REFUSE de le lister, pour qu'aucune politique ne puisse l'eteindre par erreur.
+ * Sans elle, l'arbitre
  * deviendrait un filtre a disparition : le proprietaire qui filtre le bruit
  * perdrait aussi le signal, et la bourse reservee ne servirait plus a rien.
  *
@@ -525,20 +536,23 @@ export class DeliveryBudget {
  * Le chemin rapide APPEND une ligne. Quand l'emetteur depasse 'keep' messages,
  * les plus anciens du MEME emetteur sont retires et le fichier est reecrit —
  * c'est la seule reecriture, et elle est exigee par la borne « N derniers par
- * emetteur ». La rotation a maxBytes garde une generation ('<fichier>.1').
+ * emetteur ». La rotation a maxBytes garde une generation ('<fichier>.1'), et la
+ * LECTURE lit les deux : la surface lisible est exactement ce que le disque porte.
  */
 export class ChannelStore {
   constructor({ file, maxBytes = LOG_MAX_BYTES, keep = KEEP_PER_SENDER }) {
     this.file = file
     this.maxBytes = maxBytes
     this.keep = keep
+    // La derniere lecture a-t-elle reintegre la generation '<fichier>.1' ?
+    this.merged = false
   }
 
-  /** Les enveloppes du fichier actif, dans l'ordre d'ecriture. */
-  load() {
+  /** Les lignes d'UN fichier. Une ligne dechiree est ignoree, jamais fatale. */
+  readLines(file) {
     let text
     try {
-      text = readFileSync(this.file, 'utf8')
+      text = readFileSync(file, 'utf8')
     } catch {
       return []
     }
@@ -556,7 +570,34 @@ export class ChannelStore {
     return out
   }
 
-  /** Rotation AVANT l'ecriture, jamais apres : une generation, et rien de perdu. */
+  /**
+   * Les enveloppes de l'arbre, DANS L'ORDRE CHRONOLOGIQUE : la generation
+   * precedente ('<fichier>.1') PUIS le fichier actif.
+   *
+   * LIRE LES DEUX EST LA CONDITION DE « RIEN N'EST PERDU ». Ne lire que le fichier
+   * actif faisait disparaitre de la surface tout ce qu'une rotation venait de
+   * renommer — des messages throttles ou filtres que la lecture ne rendait plus —
+   * et, plus grave, la BASE du calcul d'identite : l'id etait reemis pour un autre
+   * message, la dedup par identite les confondait, et la place reservee du premier
+   * etait ecrasee (mesure).
+   *
+   * 'merged' retient que CETTE lecture a reintegre la generation : c'est ce qui
+   * autorise 'writeAll' a la supprimer.
+   */
+  load() {
+    const older = this.readLines(this.file + '.1')
+    const active = this.readLines(this.file)
+    this.merged = older.length > 0
+    return older.concat(active)
+  }
+
+  /**
+   * Rotation AVANT l'ecriture, jamais apres : une generation gardee.
+   *
+   * La generation ECRASEE est la plus ANCIENNE : c'est la borne de disque, et le
+   * seul endroit ou un message quitte la surface. Tout le reste est lisible, parce
+   * que 'load' lit les deux fichiers.
+   */
   rotateIfFull(incoming) {
     try {
       const size = statSync(this.file).size
@@ -573,15 +614,27 @@ export class ChannelStore {
     const line = JSON.stringify(entry) + '\n'
     this.rotateIfFull(Buffer.byteLength(line, 'utf8'))
     appendFileSync(this.file, line, 'utf8')
+    // La lecture qui a precede cette ecriture n'est plus « en cours » : une
+    // reecriture ulterieure devra refaire SA lecture avant de supprimer '.1'.
+    this.merged = false
   }
 
-  /** Reecriture bornee : le fichier ne contient que ce qui est garde. */
+  /**
+   * Reecriture bornee : le fichier ne contient que ce qui est garde.
+   *
+   * La generation '<fichier>.1' n'est supprimee QUE si 'entries' vient d'une
+   * lecture qui l'a REINTEGREE ('merged') : sinon sa generation disparaitrait du
+   * disque ET de la lecture — c'est exactement ainsi que des messages throttles
+   * ont disparu (mesure). Une generation de trop sur le disque coute moins cher
+   * qu'un message perdu.
+   */
   writeAll(entries) {
     mkdirSync(dirname(this.file), { recursive: true })
     const body = entries.map((entry) => JSON.stringify(entry) + '\n').join('')
     const tmp = this.file + '.tmp'
     writeFileSync(tmp, body, 'utf8')
-    rmSync(this.file + '.1', { force: true })
+    if (this.merged) rmSync(this.file + '.1', { force: true })
+    this.merged = false
     renameSync(tmp, this.file)
   }
 
@@ -901,21 +954,41 @@ export function createChannel(deps = {}) {
    */
   const pendingKey = (root, id) => String(root) + '\u0000' + String(id)
 
+  /** Cette identite est-elle DEJA en attente d'arret dans ce magasin ? */
+  function pendingHolds(from, id, root) {
+    return pending.get(from)?.has(pendingKey(root, id)) === true
+  }
+
+  /**
+   * @returns 'true' si l'attente est posee ; 'false' si la cle est DEJA tenue —
+   *   auquel cas RIEN n'est ecrase, la place du precedent est intacte, et la
+   *   collision est journalisee. 'post' a deja refuse ce depot avant de reserver
+   *   quoi que ce soit : ce garde est la ceinture du chemin reel.
+   */
   function markPending(from, id, root, seat = {}) {
     let mine = pending.get(from)
     if (mine === undefined) pending.set(from, (mine = new Map()))
+    const key = pendingKey(root, id)
+    if (mine.has(key)) {
+      // Un 'set' aveugle ecrasait la place tenue par le message precedent, et plus
+      // rien ne pouvait la rendre : elle restait depensee pour toute la fenetre
+      // alors qu'aucune livraison n'avait eu lieu (mesure).
+      journal({ step: 'pending-collision', id, from, root: safeKey(root), why: 'kept-existing-seat' })
+      return false
+    }
     // 'reserved' dit si ce message detient une place de la bourse RESERVEE, et
     // 'at' l'instant ou elle a ete consommee : c'est ce couple qui permet de la
     // RENDRE si la livraison n'a finalement pas lieu. 'to' est le destinataire,
     // garde ici pour rendre la place meme si l'enregistrement a ete evince
     // entre-temps par la borne par emetteur.
-    mine.set(pendingKey(root, id), {
+    mine.set(key, {
       id,
       root,
       to: seat.to ?? null,
       reserved: seat.reserved === true,
       at: seat.at ?? null,
     })
+    return true
   }
 
   function forgetPending(from, id, root) {
@@ -923,6 +996,36 @@ export function createChannel(deps = {}) {
     if (mine === undefined) return
     mine.delete(pendingKey(root, id))
     if (mine.size === 0) pending.delete(from)
+  }
+
+  /**
+   * LA MARQUE HAUTE PAR IDENTITE — prefixe d'identite -> derniere sequence EMISE.
+   *
+   * L'identite est une IDENTITE, pas un numero de ligne : elle ne doit JAMAIS etre
+   * reemise. La calculer sur ce qu'on LIT ('nextId') marchait tant que la lecture
+   * voyait tout ; depuis que la surface est bornee (rotation a maxBytes, borne par
+   * emetteur), une fenetre qui tourne fait disparaitre la BASE du calcul : l'id est
+   * reemis, deux messages DISTINCTS portent la meme identite — la dedup par
+   * identite (regle 4) les confond, et la place reservee du premier est ecrasee
+   * (mesure : une place perdue pour toute la fenetre, et la question d'un frere
+   * innocent refusee).
+   *
+   * La marque vit donc en memoire, comme l'index des attentes, et elle est
+   * MONOTONE : elle ne redescend jamais, quoi qu'il arrive au magasin. Un processus
+   * neuf la re-derive de la surface FUSIONNEE ('.1' + fichier actif), qui contient
+   * toujours les ids les PLUS RECENTS — la rotation retire la generation la plus
+   * ANCIENNE — donc aucun id vivant n'est reemis apres un redemarrage.
+   */
+  const sequences = new Map()
+
+  /** L'identite du prochain message : monotone, jamais rederivee d'une fenetre seule. */
+  function nextIdentity(from, entries, qualifier) {
+    const prefix = (qualifier === null ? '' : qualifier + ':') + from + ':'
+    const fromStore = Number.parseInt(nextId(from, entries, qualifier).slice(prefix.length), 10)
+    const base = Math.max(sequences.get(prefix) ?? 0, Number.isInteger(fromStore) ? fromStore - 1 : 0)
+    const seq = base + 1
+    sequences.set(prefix, seq)
+    return prefix + seq
   }
 
   /** Jauge : combien de messages attendent un arret, maintenant. */
@@ -1071,7 +1174,7 @@ export function createChannel(deps = {}) {
     // ne suffit plus : un depot dans un magasin qui n'est pas celui de l'emetteur.
     const id = typeof input.id === 'string' && input.id !== ''
       ? input.id
-      : nextId(from, entries, root === own ? null : root)
+      : nextIdentity(from, entries, root === own ? null : root)
     const clipped = clipSummary(input.summary)
     const state = deriveState({ kind, ...(input.facts ?? factsOf(from, kind)) })
     const payloadRef = normalisePayloadRef(input.payloadRef)
@@ -1105,6 +1208,15 @@ export function createChannel(deps = {}) {
       stats.deduped++
       counters('post', { id, duplicate: true })
       return { id, state, duplicate: true, wake: 'none', budget: budget.snapshot(from, envelope.to) }
+    }
+    // UN ID DEJA EN ATTENTE N'EST JAMAIS ECRASE. L'id genere ne peut plus l'etre
+    // ('nextIdentity' est monotone), mais la voie du service interne peut fournir
+    // un id EXPLICITE : une place tenue par un message qui attend son arret ne doit
+    // pas etre perdue. On refuse le depot, on le journalise, et on ne consomme RIEN
+    // — le controle est AVANT la reservation.
+    if (eligible && pendingHolds(from, id, root)) {
+      journal({ step: 'pending-collision', id, from, root: safeKey(root), why: 'id-already-pending' })
+      throw new Error('channel: id ' + id + ' is already pending a stop in this tree (identity collision)')
     }
     // LA LIVRAISON EST BORNEE ICI, L'ECRITURE NE L'EST JAMAIS : la decision est
     // prise AVANT l'append pour que 'throttled' soit ecrit par la MEME ecriture.
@@ -1153,7 +1265,12 @@ export function createChannel(deps = {}) {
     if (throttled) countThrottled(envelope, deliveryPurseOf(kind))
     if (filtered) countFiltered(envelope, filterFor(root))
     if (eligible) {
-      markPending(from, id, root, seat)
+      // Si la cle etait deja tenue (impossible par construction : le controle
+      // ci-dessus a deja refuse), la place du nouveau message est RENDUE — elle
+      // n'a pas ete prise.
+      if (!markPending(from, id, root, seat) && seat?.reserved === true) {
+        budget.reserved.refund(from, envelope.to, seat.at)
+      }
     } else if (wake === 'none') {
       // Bourse ORDINAIRE : la place se consomme par la livraison ELLE-MEME, donc
       // seule une livraison REELLEMENT faite la depense.
@@ -1421,6 +1538,19 @@ export function declaredArguments(channel, tool, args, allowed) {
 }
 
 /** Les deux outils du canal, construits sur un canal. */
+/**
+ * LES OUTILS DU CANAL — SOURCE UNIQUE, dans l'ordre ou ils sont enregistres.
+ *
+ * La fabrique ('buildTools'), les deux sondes ('tools/probe-*.mjs') et la suite
+ * lisent CETTE liste. Une liste recopiee a la main est une liste qui ment un jour,
+ * et elle a menti : 'probe-stop.mjs' verifiait encore « deux outils » et sortait en
+ * PROBE-FAIL sans executer une seule mesure, pendant que 'probe-mount.mjs'
+ * n'inspectait que deux noms sur trois — un troisieme outil etait invisible a la
+ * mesure. La suite compare ce que 'buildTools' FABRIQUE a cette liste : un outil
+ * ajoute sans elle fait rougir un cas, pas une sonde que personne ne lance.
+ */
+export const TOOL_NAMES = ['channel_post', 'channel_read', 'channel_subscribe']
+
 export function buildTools(channel) {
   return [
     {
@@ -1531,8 +1661,10 @@ export function buildTools(channel) {
       description: 'Regle ce que TU acceptes de voir pousse dans TON contexte : tu es le proprietaire de l arbre, et '
         + 'ce reglage ne porte QUE sur les kinds non reveillants (decouverte, avancement). Les kinds reveillants '
         + '(question, resultat, echec) passent TOUJOURS, meme sous un filtre vide : un filtre ne peut pas les faire '
-        + 'disparaitre, sinon le bruit ferait taire le signal. Un message refuse n est PAS perdu : il est stocke, '
-        + 'marque filtered, et tu le tires avec channel_read. inject=[] n injecte plus aucun kind ordinaire ; '
+        + 'disparaitre, sinon le bruit ferait taire le signal — et les LISTER dans inject LEVE : ils ne se filtrent '
+        + 'pas, et un appel qui croit les mettre en silence eteindrait toute ta politique ordinaire. Un message refuse '
+        + 'n est PAS perdu : il est stocke, marque filtered, et tu le tires avec channel_read. '
+        + 'inject=[] n injecte plus aucun kind ordinaire ; '
         + 'inject=["decouverte","avancement"] remet le defaut permissif. Seul le proprietaire de l arbre peut appeler '
         + 'cet outil : un enfant est refuse, compte, et sa demande ne change rien. Le seul argument lu est inject ; '
         + 'tout autre est ignore et journalise. Rend ce qui est desormais injecte.',
