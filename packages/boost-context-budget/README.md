@@ -85,3 +85,26 @@ node --test packages/boost-context-budget/test/context-budget.test.mjs
 
 24 cas, T-C1 a T-C7 : la mesure et sa frontiere, le refus et son message, le seuil configurable, la
 compaction differee et son idempotence par tour, le seuil invalide, et l'outil lui-meme.
+
+## Sonde
+
+```
+node packages/boost-context-budget/tools/probe-fork-guard.mjs
+```
+
+Elle monte la VRAIE application cordis, le VRAI registre `dsh-tools` et les VRAIES portees
+(`dsh-scope`), puis mesure ce qu'un test a surface factice ne peut pas mesurer :
+
+1. l'**admission** d'un listener `tools/pre-execute` sans tag monte sur la ligne HOTE, avec son
+   **controle de vivacite** (un listener monte sous une portee TAGUEE ne recoit pas l'appel d'un
+   autre agent) ;
+2. le **refus arrive jusqu'au registre** par `registry.execute(...)`, avec son motif et son code,
+   et le corps de l'outil n'est pas invoque ;
+3. le **passage** sous le seuil, corps execute et chaine non coupee (un listener en aval le voit) ;
+4. le **faux negatif** : sans mesure, le fork n'est pas refuse et le journal dit `fork-unguarded` ;
+5. la **compaction differee** : un refus arme, `turn/end` declenche `compactNow` une fois, un tour
+   sans refus jamais.
+
+Sortie 0 seulement si les cinq concordent. Falsification : en montant la garde sous la portee
+TAGUEE de l'enfant au lieu de la ligne hote, la sonde sort en `PROBE-FAIL` et nomme la perte
+(`le refus n atteint pas le registre`, journal vide, zero compaction).
