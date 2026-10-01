@@ -24,7 +24,9 @@ import {
   clipSummary,
   createChannel,
   deriveState,
+  isWakeEligible,
   liveRootOf,
+  stoppedState,
   wakePolicy,
 } from '../lib/index.js'
 
@@ -46,6 +48,7 @@ function fakeTree() {
   return {
     add,
     calls,
+    remove: (id) => agents.delete(id),
     agents: { get: (id) => agents.get(id), list: () => [...agents.values()] },
   }
 }
@@ -196,30 +199,45 @@ test('borne : au 51e message d un meme emetteur, le plus ancien disparait', () =
   }
 })
 
-test('retrogradation : question avec etat derive running -> stocke, wake_refused, AUCUN reveil', () => {
+// T-D1 : la faille que ce chantier corrige. 'channel_post' EST un appel d'outil,
+// donc l'emetteur travaille toujours quand il depose : decider ici rendait les
+// reveils 'question'+'blocked' et 'resultat'+'done' inatteignables.
+test('T-D1 : question deposee pendant que l emetteur est running -> AUCUN reveil, wake_pending = 1', () => {
   const { home, tree, child, channel } = mount()
   try {
     const posted = channel.post({ from: child.id, kind: 'question', summary: 'dois-je continuer ?' })
     assert.equal(posted.state, 'running', 'un enfant qui n a pas cesse de produire derive running')
-    assert.equal(posted.wake, 'refused')
+    assert.equal(posted.wake, 'pending', 'le depot ne decide RIEN : le reveil se re-evalue a l arret')
     assert.deepEqual(tree.calls, [], 'ni send ni inject : le declaratif ne force RIEN')
-    assert.equal(channel.stats().wake_refused, 1)
+    assert.equal(channel.stats().wake_pending, 1, 'le message est en attente d arret')
     assert.equal(channel.stats().wake_sent, 0)
-    assert.equal(channel.stats().delivered, 0, 'une question retrogradee n est meme pas injectee')
-    assert.equal(channel.storeFor('session-root').load().length, 1, 'le message est STOCKE')
+    assert.equal(channel.stats().wake_refused, 0, 'un message en attente n est pas encore retrograde')
+    assert.equal(channel.stats().delivered, 0, 'rien n est livre au depot')
+    const stored = channel.storeFor('session-root').load()
+    assert.equal(stored.length, 1, 'le message est STOCKE')
+    assert.equal(stored[0].wake_pending, true, 'le marqueur est dans l enregistrement, pas seulement en memoire')
     assert.deepEqual(channel.read({ from: 'session-root' }).map((row) => row.kind), ['question'])
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('reveil legitime : question avec etat blocked -> reveil compte', () => {
+// T-D2 : LE point de decision. L'arret est le fait qui manquait au depot.
+test('T-D2 : l emetteur s arrete, son etat derive est blocked -> le reveil part A CE MOMENT-LA', () => {
   const { home, tree, child, channel } = mount()
   try {
-    child.status = 'idle' // vivant, mais il a cesse de produire
-    const posted = channel.post({ from: child.id, kind: 'question', summary: 'bloque : quelle cible ?' })
-    assert.equal(posted.state, 'blocked')
-    assert.equal(posted.wake, 'sent')
+    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'bloque : quelle cible ?' }).wake, 'pending')
+    assert.deepEqual(tree.calls, [], 'aucun reveil avant l arret')
+    // 'status' reste 'running' : c'est exactement la fenetre ou 'turn/end' est
+    // enregistre avant que le driver ne bascule 'idle'. L'arret observe EST le
+    // fait ; lire 'status' ici serait un pari.
+    child.status = 'running'
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.state, 'blocked')
+    assert.equal(report.evaluated, 1)
+    assert.equal(report.wake_sent, 1)
+    assert.equal(report.still_pending, 0)
+    assert.equal(channel.stats().wake_pending, 0, 'la jauge retombe a 0')
     assert.equal(channel.stats().wake_sent, 1)
     assert.equal(channel.stats().delivered, 1)
     assert.equal(tree.calls.length, 1)
@@ -228,6 +246,132 @@ test('reveil legitime : question avec etat blocked -> reveil compte', () => {
     assert.equal(tree.calls[0].target, 'next-step')
     assert.equal(tree.calls[0].wakeup, true, 'un reveil reveille le driver')
     assert.equal(tree.calls[0].message.id, 'fake:session-child:1')
+    const [stored] = channel.storeFor('session-root').load()
+    assert.equal(stored.state, 'blocked', 'l etat RE-DERIVE a l arret est celui qui a decide')
+    assert.equal(stored.wake_pending, false, 'consomme une fois, jamais re-evalue')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-D2b : la retrogradation AU POINT DE DECISION. §6 reste vrai — mais il se
+// prononce a l'arret, pas au depot.
+test('T-D2b : question dont l emetteur est parti (done) -> RETROGRADEE a l arret, aucun reveil', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    channel.post({ from: child.id, kind: 'question', summary: 'je ne repondrai plus' })
+    tree.remove(child.id) // l emetteur a quitte le registre : etat derive 'done'
+    const report = channel.stopped(child.id, { why: 'agent/disposed' })
+    assert.equal(report.state, 'done')
+    assert.equal(report.wake_refused, 1, 'un kind eligible dont l etat ne justifie pas le reveil est retrograde')
+    assert.equal(report.wake_sent, 0)
+    assert.deepEqual(tree.calls, [], 'rien n est appele : ni send, ni inject')
+    assert.equal(channel.stats().wake_refused, 1)
+    assert.equal(channel.stats().wake_pending, 0, 'la retrogradation consomme le message')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-D3 : l'ordre REEL des deux arrets. Un 'resultat' n'est pas decidable a
+// 'turn/end' (l'etat y est blocked, le §4 exige done) : il reste en attente
+// jusqu'a la sortie du registre. C'est mesure par 'tools/probe-stop.mjs'.
+test('T-D3 : resultat depose en cours de tour -> reveil quand l emetteur est done', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const posted = channel.post({ from: child.id, kind: 'resultat', summary: 'fini' })
+    assert.equal(posted.wake, 'pending')
+    assert.equal(channel.stats().wake_pending, 1)
+
+    // Premier arret : la fin du tour. L'emetteur est vivant, donc 'blocked' —
+    // le §4 exige 'done' pour un resultat : rien n'est decide, rien n'est perdu.
+    const atTurnEnd = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(atTurnEnd.state, 'blocked')
+    assert.equal(atTurnEnd.evaluated, 0, 'inject n est pas une consommation')
+    assert.equal(atTurnEnd.still_pending, 1)
+    assert.deepEqual(tree.calls, [], 'aucun reveil a la fin du tour')
+    assert.equal(channel.stats().wake_pending, 1)
+
+    // Second arret : la sortie du registre. L'etat derive est 'done' -> reveil.
+    tree.remove(child.id)
+    const atDisposal = channel.stopped(child.id, { why: 'agent/disposed' })
+    assert.equal(atDisposal.state, 'done')
+    assert.equal(atDisposal.wake_sent, 1)
+    assert.equal(channel.stats().wake_sent, 1)
+    assert.equal(channel.stats().wake_pending, 0)
+    assert.equal(tree.calls.length, 1)
+    assert.equal(tree.calls[0].method, 'send')
+    assert.equal(tree.calls[0].wakeup, true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-D4 : sans arret, rien. Le delai est simule par l'horloge injectee.
+test('T-D4 : un emetteur qui ne s arrete JAMAIS laisse son message en attente, sans reveiller personne', () => {
+  const { home, tree, child, channel, clock } = mount()
+  try {
+    channel.post({ from: child.id, kind: 'question', summary: 'dans le vide' })
+    clock.at += 600000 // dix minutes simulees : aucun arret n est survenu
+    assert.deepEqual(tree.calls, [], 'le temps ne remplace pas un arret')
+    assert.equal(channel.stats().wake_pending, 1)
+    assert.equal(channel.stats().wake_sent, 0)
+    assert.equal(channel.stats().wake_refused, 0)
+    // Le message reste lisible par le proprietaire : l attente n est pas une perte.
+    assert.deepEqual(channel.read({ from: 'session-root' }).map((row) => row.id), ['session-child:1'])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-D5 : idempotence. Un message consomme ne l est plus jamais, meme si l etat
+// change entre deux arrets.
+test('T-D5 : deux arrets successifs ne produisent qu UN SEUL reveil', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    channel.post({ from: child.id, kind: 'question', summary: 'une seule fois' })
+    assert.equal(channel.stopped(child.id, { why: 'turn/end' }).wake_sent, 1)
+    assert.equal(tree.calls.length, 1)
+    // Second arret, et cette fois l etat derive est 'done' : le message est deja
+    // consomme, donc rien de neuf — pas de second reveil, pas de re-evaluation.
+    tree.remove(child.id)
+    const second = channel.stopped(child.id, { why: 'agent/disposed' })
+    assert.equal(second.evaluated, 0)
+    assert.equal(second.wake_sent, 0)
+    assert.equal(second.still_pending, 0)
+    assert.equal(tree.calls.length, 1, 'un seul reveil pour un seul message')
+    assert.equal(channel.stats().wake_sent, 1)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-D6 : le limiteur de cadence garde son role, mais il mord a la RE-EVALUATION.
+test('T-D6 : le limiteur de cadence mord a la re-evaluation, jamais au depot', () => {
+  const { home, tree, child, channel, clock } = mount()
+  try {
+    // Deux depots pendant le tour : aucune place du limiteur n est consommee.
+    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'q1' }).wake, 'pending')
+    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'q2' }).wake, 'pending')
+    assert.deepEqual(channel.limiter.window_(channel.limiter.children, child.id), [], 'le depot ne consomme rien')
+    assert.deepEqual(channel.limiter.window_(channel.limiter.trees, 'session-root'), [])
+    assert.equal(channel.stats().wake_pending, 2)
+
+    // Premier arret : une place consommee, la seconde est refusee par la cadence.
+    const first = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(first.wake_sent, 1)
+    assert.equal(first.wake_refused, 1)
+    assert.equal(channel.stats().wake_sent, 1)
+    assert.equal(channel.stats().wake_refused, 1)
+    assert.equal(tree.calls.length, 1, 'le second reveil n a pas ete emis')
+    assert.equal(channel.stats().wake_pending, 0, 'les deux messages sont consommes : l un reveille, l autre est retrograde')
+    assert.equal(channel.limiter.window_(channel.limiter.children, child.id).length, 1)
+
+    // La fenetre glisse : nouvel arret, nouveau reveil.
+    clock.at += 120001
+    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'q3' }).wake, 'pending')
+    assert.equal(channel.stopped(child.id, { why: 'turn/end' }).wake_sent, 1)
+    assert.equal(channel.stats().wake_sent, 2)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
@@ -248,25 +392,6 @@ test('avancement : livre par inject, sans reveiller le driver', () => {
   }
 })
 
-test('cadence : deux reveils en moins de 120 s pour le meme enfant -> le second est refuse', () => {
-  const { home, tree, child, channel, clock } = mount()
-  try {
-    child.status = 'idle'
-    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'q1' }).wake, 'sent')
-    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'q2' }).wake, 'refused:child-rate')
-    assert.equal(channel.stats().wake_sent, 1)
-    assert.equal(channel.stats().wake_refused, 1)
-    assert.equal(tree.calls.length, 1, 'le second reveil n a pas ete emis')
-
-    // Au-dela de la fenetre, le reveil est de nouveau possible.
-    clock.at += 120001
-    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'q3' }).wake, 'sent')
-    assert.equal(channel.stats().wake_sent, 2)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-})
-
 test('cadence : au plus 3 reveils par arbre et par 120 s', () => {
   const limiter = new WakeLimiter({ now: () => 0 })
   const first = limiter.allow('session-a', 'session-root')
@@ -278,25 +403,27 @@ test('cadence : au plus 3 reveils par arbre et par 120 s', () => {
   assert.equal(limiter.allow('session-e', 'session-root', 0).ok, false)
 })
 
-test('compteurs : posted/read/delivered/wake_sent/wake_refused/truncated/deduped refletent les scenarios', () => {
+test('compteurs : posted/read/read_refused/delivered/wake_sent/wake_refused/wake_pending/truncated/deduped', () => {
   const { home, child, channel } = mount()
   try {
     channel.post({ from: child.id, kind: 'avancement', summary: 'court' })                 // inject
-    channel.post({ from: child.id, kind: 'question', summary: 'bloque ?' })                // retrograde
-    channel.post({ from: child.id, kind: 'question', summary: 'q'.repeat(5000) })          // retrograde + tronque
-    child.status = 'idle'
-    channel.post({ from: child.id, kind: 'question', summary: 'vraiment bloque' })         // reveil
-    channel.post({ from: child.id, kind: 'question', summary: 'encore' })                  // cadence : refuse
+    channel.post({ from: child.id, kind: 'question', summary: 'bloque ?' })                // pending
+    channel.post({ from: child.id, kind: 'question', summary: 'q'.repeat(5000) })          // pending + tronque
+    assert.equal(channel.stats().wake_pending, 2, 'deux reveils en attente d arret')
+    channel.stopped(child.id, { why: 'turn/end' })                                         // reveil (1) + cadence (1)
     channel.post({ from: child.id, kind: 'avancement', summary: 'encore du travail' })     // inject
     channel.post({ from: child.id, kind: 'avancement', summary: 'dup', id: 'doublon' })    // inject
     channel.post({ from: child.id, kind: 'avancement', summary: 'dup', id: 'doublon' })    // dedup
-    assert.equal(channel.read({ from: 'session-root' }).length, 7)
+    channel.read({ from: 'session-child' })                                                // lecture refusee (non-proprietaire)
+    assert.equal(channel.read({ from: 'session-root' }).length, 5)
     assert.deepEqual(channel.stats(), {
-      posted: 7,
-      read: 7,
+      posted: 5,
+      read: 5,
+      read_refused: 1,
       delivered: 4,
       wake_sent: 1,
-      wake_refused: 3,
+      wake_refused: 1,
+      wake_pending: 0,
       truncated: 1,
       deduped: 1,
     })
@@ -403,15 +530,34 @@ test('les etats derives et la politique de reveil couvrent la table du §4', () 
   assert.equal(wakePolicy('resultat', 'failed'), 'wake')
   assert.equal(wakePolicy('avancement', 'failed'), 'wake')
   assert.equal(wakePolicy('decouverte', 'done'), 'inject')
+
+  // L'eligibilite au reveil DIFFERE : ce qui attend un arret, et ce qui n'attend rien.
+  assert.equal(isWakeEligible('question', 'running'), true)
+  assert.equal(isWakeEligible('resultat', 'running'), true)
+  assert.equal(isWakeEligible('decouverte', 'failed'), true, 'un echec se constate, il ne se declare pas')
+  assert.equal(isWakeEligible('avancement', 'running'), false)
+  assert.equal(isWakeEligible('decouverte', 'done'), false)
+
+  // L'etat derive A L'ARRET : la branche 'running' disparait, et ce n'est pas un
+  // oubli — l'arret observe est la preuve que l'emetteur a cesse de produire,
+  // meme si 'status' n'a pas encore bascule.
+  assert.equal(stoppedState({ live: true, status: 'running', failed: false }), 'blocked')
+  assert.equal(stoppedState({ live: true, status: 'idle', failed: false }), 'blocked')
+  assert.equal(stoppedState({ live: false }), 'done')
+  assert.equal(stoppedState({ live: false, failed: true }), 'failed')
+  assert.equal(stoppedState({}), 'done')
 })
 
-test('un echec observe sur un tool/result derive failed, et reveille', () => {
+test('un echec observe sur un tool/result est eligible, et reveille A L ARRET', () => {
   const { home, tree, child, channel } = mount()
   try {
     child.failed = true
     const posted = channel.post({ from: child.id, kind: 'resultat', summary: 'la suite echoue' })
     assert.equal(posted.state, 'failed')
-    assert.equal(posted.wake, 'sent')
+    assert.equal(posted.wake, 'pending', 'l echec se constate au depot, il se reveille a l arret')
+    assert.deepEqual(tree.calls, [])
+    assert.equal(channel.stopped(child.id, { why: 'turn/end' }).state, 'failed')
+    assert.equal(channel.stats().wake_sent, 1)
     assert.equal(tree.calls[0].method, 'send')
     assert.equal(tree.calls[0].wakeup, true)
   } finally {
@@ -430,6 +576,140 @@ test('only_unread : ce qui a ete tire une fois ne l est plus', () => {
     assert.equal(channel.read({ from: 'session-root' }).length, 2)
     // since par id : tout ce qui suit.
     assert.deepEqual(channel.read({ from: 'session-root', since: 'session-child:1' }).map((row) => row.id), ['session-child:2'])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-D7 : le branchement sur les deux signaux REELS (mesures par
+// 'tools/probe-stop.mjs' : turn/end atteint la ligne hote pour un enfant, et
+// agent/disposed aussi). Un evenement qui n'est pas un arret ne doit rien faire.
+test('T-D7 : l arret est branche sur turn/end ET agent/disposed, sur rien d autre', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-channel-stop-'))
+  try {
+    const handlers = new Map()
+    const calls = []
+    const agents = new Map()
+    const add = (id, parent) => {
+      const agent = {
+        id,
+        status: 'running',
+        session: { id, header: parent === undefined ? {} : { parentSession: parent } },
+        inject: (message) => calls.push({ method: 'inject', to: id, message }),
+        send: (message, target, wakeup) => calls.push({ method: 'send', to: id, message, target, wakeup }),
+      }
+      agents.set(id, agent)
+      return agent
+    }
+    add('session-root')
+    const child = add('session-child', 'session-root')
+    const ctx = {
+      agents: { get: (id) => agents.get(id), list: () => [...agents.values()] },
+      on: (event, handler) => handlers.set(event, handler),
+      provide: () => {},
+      tools: { register: () => {} },
+    }
+    const channel = apply(ctx, { home, makeMessage: (envelope) => ({ id: envelope.id }) })
+    assert.equal(typeof handlers.get('session/event'), 'function', 'le feed des sessions est ecoute')
+    assert.equal(typeof handlers.get('agent/disposed'), 'function', 'la sortie du registre est ecoutee')
+
+    assert.equal(channel.post({ from: child.id, kind: 'question', summary: 'arrete-toi' }).wake, 'pending')
+    handlers.get('session/event')({ id: child.id }, { type: 'step/start' })
+    assert.equal(channel.stats().wake_pending, 1, 'un evenement qui n est pas un arret ne decide rien')
+    assert.deepEqual(calls, [])
+    handlers.get('session/event')({ id: child.id }, { type: 'turn/end' })
+    assert.equal(channel.stats().wake_sent, 1)
+    assert.equal(channel.stats().wake_pending, 0)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'send')
+
+    // La sortie du registre : le registre REEL retire l'agent AVANT d'annoncer
+    // ('detachEntered'), donc l'etat derive a cet instant est 'done'.
+    const second = add('session-second', 'session-root')
+    assert.equal(channel.post({ from: second.id, kind: 'resultat', summary: 'fini' }).wake, 'pending')
+    agents.delete('session-second')
+    handlers.get('agent/disposed')({ agent: second })
+    assert.equal(channel.stats().wake_sent, 2)
+    assert.equal(channel.stats().wake_pending, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-A1 : l'adressage n'est pas une propriete du stockage seul. Un enfant de
+// l'arbre — le VERIFICATEUR, par exemple — ne doit pas recevoir les conclusions
+// de l'implementateur qu'il est cense contredire.
+test('T-A1 : un enfant appelle la lecture -> page VIDE, read_refused, AUCUN marqueur ecrit', () => {
+  const { home, child, channel } = mount()
+  try {
+    const posted = channel.post({ from: child.id, kind: 'question', summary: 'au proprietaire' })
+    assert.equal(posted.wake, 'pending')
+    const page = channel.read({ from: child.id, only_unread: true })
+    assert.deepEqual(page, [], 'un enfant ne recoit pas les resumes des autres')
+    assert.equal(channel.stats().read_refused, 1, 'un refus silencieux serait indistinguable d un canal vide')
+    assert.equal(channel.stats().read, 0, 'une lecture refusee ne rend rien')
+    // Rien n a ete marque lu : l id reste only_unread VRAI pour le proprietaire.
+    const owner = channel.read({ from: 'session-root', only_unread: true })
+    assert.deepEqual(owner.map((row) => row.id), ['session-child:1'])
+    // Le refus est trace, avec son motif.
+    const journal = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+    assert.equal(journal.includes('"step":"read-refused"'), true)
+    assert.equal(journal.includes('"why":"not-addressee"'), true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-A2 : le proprietaire, lui, voit tout ce qui est adresse a son arbre.
+test('T-A2 : le proprietaire lit les messages de ses enfants', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const sibling = tree.add('session-sibling', 'running', 'session-root')
+    channel.post({ from: child.id, kind: 'avancement', summary: 'de l enfant' })
+    channel.post({ from: sibling.id, kind: 'resultat', summary: 'du frere' })
+    const page = channel.read({ from: 'session-root' })
+    assert.deepEqual(page.map((row) => row.summary), ['de l enfant', 'du frere'])
+    assert.equal(channel.stats().read_refused, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-A3 : un message adresse a une session n'est rendu qu'a elle.
+test('T-A3 : un message adresse a un enfant est rendu A CET ENFANT, et a personne d autre', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const sibling = tree.add('session-sibling', 'running', 'session-root')
+    // La voie du SERVICE INTERNE nomme le destinataire ('to') ; la voie de
+    // l'outil, elle, adresse toujours la racine de l'arbre.
+    channel.post({ from: 'session-root', kind: 'avancement', summary: 'pour le seul enfant', to: child.id })
+    channel.post({ from: child.id, kind: 'avancement', summary: 'pour la racine' })
+    assert.deepEqual(channel.read({ from: child.id }).map((row) => row.summary), ['pour le seul enfant'])
+    assert.deepEqual(channel.read({ from: sibling.id }), [], 'le frere ne voit pas ce qui est adresse a l autre')
+    assert.equal(channel.stats().read_refused, 1)
+    assert.deepEqual(channel.read({ from: 'session-root' }).map((row) => row.summary), ['pour la racine'],
+      'le proprietaire ne voit pas ce qui est adresse a un enfant')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-A4 : le compteur est expose ET journalise (jamais un refus muet).
+test('T-A4 : read_refused figure dans stats() et dans le journal, avec son motif', () => {
+  const { home, child, channel } = mount()
+  try {
+    channel.post({ from: child.id, kind: 'avancement', summary: 'pour la racine' })
+    assert.equal(Object.prototype.hasOwnProperty.call(channel.stats(), 'read_refused'), true)
+    assert.equal(channel.stats().read_refused, 0)
+    channel.read({ from: child.id })
+    assert.equal(channel.stats().read_refused, 1)
+    const lines = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    const refused = lines.filter((row) => row.step === 'read-refused')
+    assert.equal(refused.length, 1)
+    assert.equal(refused[0].from, 'session-child')
+    assert.equal(refused[0].why, 'not-addressee')
+    assert.equal(lines.some((row) => row.step === 'stats' && row.read_refused === 1), true, 'l instantane porte le compteur')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
