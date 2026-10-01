@@ -114,6 +114,15 @@ function harness(options = {}) {
     compaction,
     ...options.services,
   }
+  // FAUX REGISTRE PAR DEFAUT. Les cas qui portent sur la BORNE, le seuil ou la
+  // garde n'ont pas a reconstruire un prefixe : le 'restore' injecte rend le
+  // 'contextBreakdown' des noeuds CLOS du meter (ou de la composition), avec la
+  // meme regle de frontiere — appartient au FAUX, jamais au plugin.
+  // 'noRestore: true', ou un 'restore' qui jette, exerce l'ABSTENTION.
+  if (options.noRestore !== true && typeof services.sessionProjections?.restore !== 'function') {
+    const nodes = fakeNodes(services)
+    if (nodes !== undefined) services.sessionProjections = { ...services.sessionProjections ?? {}, restore: restoreFromNodes(nodes) }
+  }
   const ctx = {
     agents: {
       list: () => [...agents.values()],
@@ -197,6 +206,39 @@ function meterOf(nodes) {
   return { measure: () => ({ nodes }) }
 }
 
+/** Les noeuds qu'un faux meter (ou une fausse composition) annonce, sans session. */
+function fakeNodes(services) {
+  const probe = { id: 'probe', snapshotEvents: () => [] }
+  try {
+    const measured = services.tokenMeter?.measure?.(probe)
+    if (Array.isArray(measured?.nodes)) return measured.nodes
+  } catch {
+    // Pas de meter utilisable : on essaie la composition.
+  }
+  try {
+    const state = services.sessionProjections?.stateOf?.(probe, 'contextBreakdown')
+    if (Array.isArray(state?.nodes)) return state.nodes
+  } catch {
+    // Rien non plus.
+  }
+  return undefined
+}
+
+/** Un faux 'restore' qui somme les noeuds CLOS du prefixe qu'on lui donne. */
+function restoreFromNodes(nodes) {
+  return (checkpoint, events) => {
+    const boundary = events.length === 0 ? -1 : events[events.length - 1].seq
+    let total = 0
+    for (const node of nodes) {
+      const seq = node?.seq
+      if (typeof seq !== 'number' || seq > boundary) continue
+      const price = typeof node.tokens === 'number' ? node.tokens : node.heuristicTokens
+      if (typeof price === 'number' && Number.isFinite(price) && price > 0) total += price
+    }
+    return { snapshot: { asOfSeq: boundary, values: { contextBreakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: total } } }, checkpoint: {} }
+  }
+}
+
 /**
  * Une projection de session : 'snapshot' pour la fenetre, 'stateOf' pour la
  * composition, et 'restore' — LA source de la mesure — quand le cas la fournit.
@@ -263,7 +305,7 @@ test('T-C1 : le ratio est rendu, et le TOUR EN VOL est exclu du prefixe herite',
   assert.ok(Math.abs(value.ratio - 0.625) < 0.02, 'ratio attendu ~0,625, mesure ' + value.ratio)
   assert.equal(value.forkThresholdRatio, DEFAULT_FORK_THRESHOLD_RATIO)
   assert.equal(value.verdict, VERDICT_REFUSED, '0,625 > 0,6 : un fork serait refuse')
-  assert.equal(value.sources.inherited, 'fallback-token-meter', 'sans restore, la mesure prend son repli et le DIT')
+  assert.equal(value.sources.inherited, 'restore-boundary', 'la mesure vient du prefixe rendu par restore')
   assert.equal(value.sources.boundarySeq, 3, 'la frontiere est le dernier turn/end, seq 3')
 })
 
@@ -288,7 +330,7 @@ test('T-C1c : sans meter, la composition contextBreakdown donne le meme prefixe'
     services: { sessionProjections: projectionsOf({ window: 160_000, nodes: [{ seq: 1, heuristicTokens: 60_000 }, { seq: 2, heuristicTokens: 40_000 }, { seq: 5, heuristicTokens: 75_000 }] }) },
   })
   const value = harnessed.controller.measureFor(session)
-  assert.equal(value.sources.inherited, 'fallback-context-breakdown')
+  assert.equal(value.sources.inherited, 'restore-boundary')
   assert.equal(value.inheritedTokens, 100_000)
   assert.equal(value.windowTokens, 160_000)
 })
@@ -314,7 +356,10 @@ test('T-C1e : avant tout tour clos, le fork n herite de RIEN', () => {
 
 test('T-C1f : la fonction de mesure est utilisable seule, hors montage', () => {
   const session = fakeSession('session-c1f', EVENTS)
-  const value = measure({ tokenMeter: meterOf([{ seq: 2, tokens: 50_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) }, session, 0.6)
+  const value = measure({
+    tokenMeter: meterOf([{ seq: 2, tokens: 50_000 }]),
+    sessionProjections: projectionsOf({ window: 100_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 50_000 }) }),
+  }, session, 0.6)
   assert.equal(value.inheritedTokens, 50_000)
   assert.equal(value.ratio, 0.5)
   assert.equal(value.verdict, VERDICT_OK)
@@ -630,12 +675,29 @@ test('T-C7 : l outil est installe par agent, sous le nom de TOOL_NAMES', () => {
 })
 
 test('T-C7b : l outil rend la mesure de l APPELANT, jamais celle d un autre', async () => {
-  const nodes = [{ seq: 1, tokens: 71_000 }]
+  // La mesure est celle de l APPELANT : elle se lit sur SON journal. Deux agents,
+  // donc deux journaux, donc deux mesures — le faux restore lit les evenements.
+  const longLog = EVENTS
+  // Le journal de Bob est DIFFERENT (son propre tour, son propre numero) : la
+  // mesure se lit sur SON journal, pas sur celui d Alice.
+  const shortLog = [
+    { type: 'turn/start', seq: 0, data: { turn: 9 } },
+    { type: 'turn/end', seq: 1, data: { turn: 9, reason: { kind: 'completed' } } },
+  ]
   const harnessed = harness({
-    services: { tokenMeter: { measure: (session) => ({ nodes: session.id === 'session-a' ? nodes : [{ seq: 1, tokens: 10_000 }] }) }, sessionProjections: projectionsOf({ window: 100_000 }) },
+    services: {
+      tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]),
+      sessionProjections: projectionsOf({
+        window: 100_000,
+        restore: (checkpoint, events) => ({
+          snapshot: { asOfSeq: events.length === 0 ? -1 : events[events.length - 1].seq, values: { contextBreakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: events.some((event) => event.data?.turn === 9) ? 10_000 : 71_000 } } },
+          checkpoint: {},
+        }),
+      }),
+    },
   })
-  const alice = fakeAgent(fakeSession('session-a', EVENTS), { status: 'idle' })
-  const bob = fakeAgent(fakeSession('session-b', EVENTS), { status: 'idle' })
+  const alice = fakeAgent(fakeSession('session-a', longLog), { status: 'idle' })
+  const bob = fakeAgent(fakeSession('session-b', shortLog), { status: 'idle' })
   harnessed.installSurface(alice)
   harnessed.installSurface(bob)
   harnessed.fire('agent/created', { agent: alice })
@@ -735,7 +797,7 @@ test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que exe
       ctx.provide('systemPrompt', { tools: () => {}, section: () => {}, getSectionOrder: () => 0 })
       ctx.provide('agents', { get: (id) => (id === 'session-c8' ? agent : undefined), list: () => [] })
       ctx.provide('tokenMeter', meterOf([{ seq: 1, tokens: 71_000 }]))
-      ctx.provide('sessionProjections', projectionsOf({ window: 100_000 }))
+      ctx.provide('sessionProjections', projectionsOf({ window: 100_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 71_000 }) }))
     },
   })
   await root.plugin(ToolRuntime, { mode: 'native' })
@@ -770,7 +832,7 @@ test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que exe
   assert.equal(result.value.windowTokens, 100_000)
   assert.equal(result.value.ratio, 0.71)
   assert.equal(result.value.verdict, VERDICT_REFUSED)
-  assert.equal(result.value.sources.inherited, 'fallback-token-meter', 'sources doit survivre a la validation du registre')
+  assert.equal(result.value.sources.inherited, 'restore-boundary', 'sources doit survivre a la validation du registre')
   assert.equal(result.value.sources.boundarySeq, 3)
   try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
 })
@@ -824,7 +886,7 @@ test('T-C9a : la mesure lit le PREFIXE par restore, borne a la frontiere, et ne 
   assert.deepEqual(restore.seen[0].events.map((event) => event.seq), [0, 1, 2, 3])
   assert.equal(restore.seen[0].baseSeq, 0)
   assert.deepEqual(restore.seen[0].checkpoint, {})
-  assert.equal(harnessed.controller.stats.measure_fallback, 0, 'restore a servi : AUCUN repli')
+  assert.equal(harnessed.controller.stats.unknown, 0, 'restore a servi : aucune abstention')
 
   // La garde ne se rouvre pas : c'est le defaut, en une ligne.
   const refusing = harness({
@@ -837,28 +899,46 @@ test('T-C9a : la mesure lit le PREFIXE par restore, borne a la frontiere, et ne 
   assert.equal(refusal.decision.kind, 'deny', 'la garde ne doit PAS se rouvrir apres une compaction')
 })
 
-test('T-C9b : le repli ne sert QUE si restore manque ou jette, et il est JOURNALISE', () => {
+test('T-C9b : sans restore (ou s il jette) la mesure vaut NULL et la garde S ABSTIENT', async () => {
   const session = fakeSession('session-c9b', EVENTS)
+  // Un meter qui ANNONCE 100 000 tokens : c'est exactement le chiffre qu'un repli
+  // rendrait. Aucun repli ne doit le rendre.
   const services = (projections) => ({ tokenMeter: meterOf([{ seq: 1, tokens: 60_000 }, { seq: 2, tokens: 40_000 }]), sessionProjections: projections })
 
-  // 1. 'restore' ABSENT : repli, et une ligne de journal qui l'avoue.
-  const absent = harness({ services: services(projectionsOf({ window: 160_000 })) })
+  // 1. 'restore' ABSENT : pas de chiffre, une abstention.
+  const absent = harness({ noRestore: true, services: services(projectionsOf({ window: 160_000 })) })
   const withoutRestore = absent.controller.measureFor(session)
-  assert.equal(withoutRestore.inheritedTokens, 100_000)
-  assert.equal(withoutRestore.sources.inherited, 'fallback-token-meter')
-  assert.equal(absent.controller.stats.measure_fallback, 1)
-  assert.equal(entriesOf(absent.dir, 'measure-fallback').length, 1, 'le repli est un AVEU : il se journalise')
+  assert.equal(withoutRestore.inheritedTokens, null, 'AUCUNE valeur de repli, jamais : pas de chiffre plutot qu un chiffre faux')
+  assert.equal(withoutRestore.ratio, null)
+  assert.equal(withoutRestore.verdict, VERDICT_UNKNOWN)
+  assert.equal(withoutRestore.sources.inherited, 'unavailable', 'la source dit que la mesure est indisponible')
+  assert.equal(absent.controller.stats.unknown, 1)
+  const passedWithout = await absent.preExecute({ name: FORK_TOOL, agent: fakeAgent(session, { status: 'idle' }), arguments: {} })
+  assert.equal(passedWithout.decision.kind, 'allow', 'sans mesure, la garde s abstient : le fork passe')
+  const rowsAbsent = entriesOf(absent.dir, 'fork-unguarded')
+  assert.equal(rowsAbsent.length, 1)
+  assert.equal(rowsAbsent[0].why, 'no-restore')
+  assert.equal(entriesOf(absent.dir, 'measure-fallback').length, 0, 'plus aucune ligne de repli : il n y a plus de repli')
 
-  // 2. 'restore' qui JETTE : meme repli, meme journal.
+  // 2. 'restore' qui JETTE : meme abstention, et le journal porte la CAUSE.
   const broken = harness({ services: services(projectionsOf({ window: 160_000, restore: () => { throw new Error('registre indisponible') } })) })
-  assert.equal(broken.controller.measureFor(session).sources.inherited, 'fallback-token-meter')
-  assert.equal(entriesOf(broken.dir, 'measure-fallback').length, 1)
+  const failed = broken.controller.measureFor(session)
+  assert.equal(failed.inheritedTokens, null, 'un restore qui jette ne rend PAS de chiffre')
+  assert.equal(failed.ratio, null)
+  assert.equal(failed.verdict, VERDICT_UNKNOWN)
+  assert.equal(failed.sources.inherited, 'unavailable', 'la valeur ne porte aucun chiffre')
+  assert.equal(failed.failure.source, 'restore-failed', 'mais la CAUSE est nommee : le journal la porte')
+  const passed = await broken.preExecute({ name: FORK_TOOL, agent: fakeAgent(session, { status: 'idle' }), arguments: {} })
+  assert.equal(passed.decision.kind, 'allow', 'la garde ne peut NI refuser NI autoriser sur la foi d un chiffre faux : elle s abstient')
+  const rowsBroken = entriesOf(broken.dir, 'fork-unguarded')
+  assert.equal(rowsBroken.length, 1)
+  assert.equal(rowsBroken[0].why, 'restore-failed')
+  assert.ok(String(rowsBroken[0].error).includes('registre indisponible'), String(rowsBroken[0].error))
 
-  // 3. 'restore' PRESENT : aucun repli, meme quand la surface dit autre chose.
+  // 3. 'restore' PRESENT : la mesure est celle du prefixe, et rien d autre.
   const primary = harness({ services: services(projectionsOf({ window: 160_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 12_345 }) })) })
   assert.equal(primary.controller.measureFor(session).inheritedTokens, 12_345)
-  assert.equal(primary.controller.stats.measure_fallback, 0)
-  assert.equal(entriesOf(primary.dir, 'measure-fallback').length, 0)
+  assert.equal(entriesOf(primary.dir, 'fork-unguarded').length, 0)
 })
 
 test('T-C9c : une fenetre IMPLAUSIBLE rend la mesure inconnue, et la garde s abstient', async () => {

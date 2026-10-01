@@ -32,8 +32,11 @@ Rend, pour l'agent **appelant** :
   Pourquoi pas une somme de **surface vive** : une compaction ne sp.lice que la surface
   (`dsh-session/lib/index.js:463`), pas le journal — une region remplacee **apres** la frontiere
   disparait des noeuds retenus, la somme tombait a **zero**, et la garde se rouvrait sur le fork
-  qu'elle venait de refuser. Le repli (ancienne somme de surface) ne sert que si `restore` est absent
-  ou jette, et il est alors **journalise** (`measure-fallback`) : un repli est un aveu, pas une mesure.
+  qu'elle venait de refuser. **Aucun repli** : quand `restore` est absent ou jette, la mesure vaut `null`,
+  le verdict `unknown`, et la garde **s'abstient** — le journal dit pourquoi (`fork-unguarded`,
+  `why: restore-failed`). Confondre ABSENCE de mesure et mesure fausse est le defaut que ce paquet
+  corrige : un repli qui rend un chiffre faux (13 849 contre 542 393, sous-mesure 39x) fait croire que la
+  garde a decide. Cas `T-C9b`.
 - `windowTokens` — la fenetre du modele de la route. Lue sur la projection `contextPressure`
   (`contextWindow`), et a defaut sur l'evenement durable `request/context` (`data.contextWindow`).
   Jamais codee en dur. Une valeur **implausible** (entier positif sous `MIN_PLAUSIBLE_WINDOW_TOKENS`,

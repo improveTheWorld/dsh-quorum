@@ -253,19 +253,6 @@ export function boundarySeqOf(events) {
   return last
 }
 
-/** Somme des noeuds de surface CLOS (seq <= frontiere) sur un champ de prix. */
-function sumClosedNodes(nodes, boundary, field) {
-  if (!Array.isArray(nodes)) return null
-  let total = 0
-  for (const node of nodes) {
-    const seq = node?.seq
-    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq > boundary) continue
-    const price = node[field]
-    if (typeof price === 'number' && Number.isFinite(price) && price > 0) total += price
-  }
-  return total
-}
-
 /** Un entier strictement positif, ou rien : la fenetre d'une route. */
 function positiveInt(value) {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null
@@ -326,30 +313,6 @@ export function openTurnOf(events) {
   return turn
 }
 
-/**
- * La surface RETENUE close : le meter d'abord, la composition ensuite.
- *
- * REPLI SEULEMENT — voir 'inheritedOf'. Elle est fausse vers le bas des qu'une
- * compaction post-frontiere retire des noeuds, et c'est mesure.
- */
-function retainedSurfaceOf(services, session, boundary) {
-  try {
-    const measurement = services.tokenMeter?.measure?.(session)
-    const total = sumClosedNodes(measurement?.nodes, boundary, 'tokens')
-    if (total !== null) return { tokens: total, source: 'token-meter' }
-  } catch {
-    // On passe a la source suivante.
-  }
-  try {
-    const state = services.sessionProjections?.stateOf?.(session, 'contextBreakdown')
-    const total = sumClosedNodes(state?.nodes, boundary, 'heuristicTokens')
-    if (total !== null) return { tokens: total, source: 'context-breakdown' }
-  } catch {
-    // Idem.
-  }
-  return null
-}
-
 /** La somme des trois champs de 'contextBreakdown', ou null si la vue manque. */
 export function breakdownTotal(breakdown) {
   if (breakdown === null || typeof breakdown !== 'object') return null
@@ -366,7 +329,6 @@ export function breakdownTotal(breakdown) {
  * LA MESURE : ce que le fork transmet, lu sur les EVENEMENTS du prefixe.
  *
  * Source unique : 'SessionProjectionRegistry.restore(checkpoint, events, baseSeq,
- * header, inheritedEventCount)' ('dsh-session-projection/lib/types/index.d.ts:263')
  * — la SEULE API du harnais parametree par un seq d'arret, dont 'asOfSeq' vaut le
  * DERNIER evenement fourni ('dsh-session-projection/lib/index.js:288,314'). On lui
  * donne exactement ce que le fork tranche ('events[0..boundary]', la frontiere de
@@ -379,11 +341,11 @@ export function breakdownTotal(breakdown) {
  * frontiere disparait donc des noeuds retenus, et toute somme de surface close
  * s'effondre : mesure du verificateur, 0 contre 541 857 de prefixe reel.
  *
- * POURQUOI PAS UN MAXIMUM avec l'ancienne vue : elle est fausse vers le BAS de
- * facon demontree, et un maximum avec une vue fausse fabrique une valeur fausse.
- * La vue de surface ne survit que comme REPLI, et seulement quand 'restore' est
- * absent ou jette — journalise 'measure-fallback', parce qu'un repli est un aveu,
- * pas une mesure.
+ * POURQUOI AUCUN REPLI : une somme de surface retenue n'est pas une mesure
+ * degradee, c'est une MESURE FAUSSE — elle rend 13 849 la ou le prefixe en vaut
+ * 542 393 (sous-mesure 39x), le fork PASSE, et le journal laisse croire que la
+ * garde a decide. Confondre ABSENCE de mesure et mesure fausse est exactement le
+ * defaut que ce paquet corrige.
  */
 export function prefixBreakdownOf(services, session, events, boundary) {
   const registry = services.sessionProjections
@@ -409,17 +371,22 @@ export function prefixBreakdownOf(services, session, events, boundary) {
  * La taille de CE QU'UN FORK HERITERAIT : le prefixe clos, mesure par la meme API
  * que celle qui parametre un arret — 'restore' borne a la frontiere.
  *
- * Le REPLI (somme de surface close, 'fallback-...') ne s'applique QUE si 'restore'
- * est absent ou jette : c'est un aveu de mesure, journalise 'measure-fallback' par
- * l'appelant, jamais un second avis qu'on prendrait quand il arrange.
+ * AUCUN REPLI, et c'est deliberé : quand 'restore' est absent ou jette, la mesure
+ * vaut 'null' et le verdict 'unknown'. La garde S'ABSTIENT, et le journal dit
+ * pourquoi ('fork-unguarded', 'why: restore-failed'). Une mesure 'unknown' n'est
+ * pas une mesure fausse — et une mesure fausse fait croire que la garde a decide :
+ * mesure du verificateur, la somme de surface rendait 13 849 la ou le prefixe en
+ * vaut 542 393 (sous-mesure 39x) et le fork PASSAIT.
  */
 export function inheritedOf(services, session, boundary, events) {
   if (boundary < 0) return { inheritedTokens: 0, source: 'no-completed-turn' }
   const restored = prefixBreakdownOf(services, session, events, boundary)
   if (restored.tokens !== null) return { inheritedTokens: restored.tokens, source: restored.source }
-  const surface = retainedSurfaceOf(services, session, boundary)
-  if (surface !== null) return { inheritedTokens: surface.tokens, source: 'fallback-' + surface.source, via: restored.source }
-  return { inheritedTokens: null, source: 'unavailable', via: restored.source }
+  return {
+    inheritedTokens: null,
+    source: 'unavailable',
+    failure: { source: restored.source, error: restored.error ?? null },
+  }
 }
 
 /**
@@ -451,6 +418,10 @@ export function measure(services, session, threshold) {
     forkThresholdRatio: threshold,
     verdict,
     sources: { inherited: inherited.source, window: window.source, boundarySeq: boundary },
+    // HORS schema de sortie : 'sources' n'a que trois cles declarees. L'outil
+    // projette les six cles canoniques ; ce champ sert au JOURNAL et a l'appelant
+    // interne, jamais au modele.
+    ...inherited.failure === undefined ? {} : { failure: inherited.failure },
   }
 }
 
@@ -551,7 +522,18 @@ export function buildTools(controller) {
         if (session === undefined || session === null) {
           throw new Error('context_occupancy: aucune session appelante — la mesure appartient a un agent.')
         }
-        return controller.measureFor(session)
+        const value = controller.measureFor(session)
+        // PROJECTION EXPLICITE sur les six cles declarees : la mesure porte en plus
+        // la cause d'une abstention ('failure'), qui n'a rien a faire dans la
+        // valeur rendue — le registre rejette toute cle non declaree.
+        return {
+          inheritedTokens: value.inheritedTokens,
+          windowTokens: value.windowTokens,
+          ratio: value.ratio,
+          forkThresholdRatio: value.forkThresholdRatio,
+          verdict: value.verdict,
+          sources: value.sources,
+        }
       },
     },
   ]
@@ -584,7 +566,7 @@ export function apply(ctx, config = {}) {
   const threshold = resolveThreshold(config.forkThresholdRatio, journal)
   const forkTools = resolveForkTools(config.forkToolNames, journal)
   const guarded = new Set(forkTools)
-  const stats = { measured: 0, refused: 0, passed: 0, compacted: 0, compact_failed: 0, unknown: 0, arm_orphaned: 0, arm_unbounded: 0, measure_fallback: 0, provider_guarded: 0 }
+  const stats = { measured: 0, refused: 0, passed: 0, compacted: 0, compact_failed: 0, unknown: 0, arm_orphaned: 0, arm_unbounded: 0, provider_guarded: 0 }
   // Une session dont le tour courant a subi un refus, AVEC LE TOUR. Un booleen ne
   // suffirait pas : l'armement survivrait a un tour qui ne se ferme JAMAIS, et
   // tirerait sur le premier 'turn/end' venu — un tour etranger, sans rapport.
@@ -597,11 +579,6 @@ export function apply(ctx, config = {}) {
     const value = measure(services, session, threshold)
     stats.measured++
     if (value.verdict === VERDICT_UNKNOWN) stats.unknown++
-    // Le repli est un AVEU : quand 'restore' n'a pas servi, ca se journalise.
-    if (typeof value.sources?.inherited === 'string' && value.sources.inherited.startsWith('fallback-')) {
-      stats.measure_fallback++
-      journal({ step: 'measure-fallback', id: safeKey(session?.id ?? '?'), source: value.sources.inherited })
-    }
     return value
   }
 
@@ -668,8 +645,16 @@ export function apply(ctx, config = {}) {
     }
     const id = exec?.agent?.session?.id
     if (verdict.ratio === null) {
-      // Pas de mesure, pas de refus : on ne devine pas.
-      journal({ step: 'fork-unguarded', id: typeof id === 'string' ? safeKey(id) : null, sources: verdict.sources })
+      // Pas de mesure, pas de refus : on ne devine pas. Et le journal DIT POURQUOI
+      // la mesure manque — 'restore-failed' n'est pas 'pas de mesure possible'.
+      const failure = verdict.failure ?? { source: verdict.sources?.inherited ?? 'unknown' }
+      journal({
+        step: 'fork-unguarded',
+        id: typeof id === 'string' ? safeKey(id) : null,
+        why: failure.source,
+        error: failure.error ?? null,
+        sources: verdict.sources,
+      })
       return next()
     }
     if (verdict.ratio <= threshold) {
