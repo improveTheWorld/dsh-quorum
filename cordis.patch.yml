@@ -1,23 +1,23 @@
-# Couche bundle agregee Boost : UNE entree `insert:` portant les SIX lignes
+# Couche bundle agregee Boost : UNE entree `insert:` portant les SEPT lignes
 # du mode Boost, dans cet ordre.
 #
 # Un bundle = un paquet dont `package.json` porte
 # `dsh.bundle.patch`. Le gestionnaire fait `pnpm add <spec>` puis ajoute le nom
 # en QUEUE de `dsh.profile.bundles`. Un seul bundle a declarer rend
-# l'installation reproductible en une commande, au lieu de cinq.
+# l'installation reproductible en une commande, au lieu de sept.
 #
 # NE PAS INSTALLER EN MEME TEMPS QUE LES SOUS-PAQUETS : `dsh-app-boot/lib/index.js:87`
 # fait `data.push(...insert)` SANS deduplication. Deux bundles inserant le meme
 # `id` montent la ligne DEUX FOIS : preset monte deux fois, outil duplique.
 # L'agregateur et les sous-paquets s'excluent donc mutuellement.
 #
-# `name` est resolu RELATIVEMENT A CE FICHIER : les cinq lignes fichier
+# `name` est resolu RELATIVEMENT A CE FICHIER : les six lignes fichier
 # portent donc `./packages/<paquet>/lib/index.js`. La ligne `preset-boost`
 # porte un nom de paquet npm, resolu par le chargeur de modules.
 #
-# Les six lignes sont recopiees A L'IDENTIQUE depuis les six
+# Les sept lignes sont recopiees A L'IDENTIQUE depuis les sept
 # `cordis.patch.yml` d'origine (memes `id`, memes `name`, memes `config`).
-# Seul ecart : le chemin des cinq `name` fichier. `test/aggregate.test.mjs`
+# Seul ecart : le chemin des six `name` fichier. `test/aggregate.test.mjs`
 # exige cette egalite et echoue a la moindre derive.
 
 - insert:
@@ -402,3 +402,8 @@
     # SON fichier.
     - id: dsh-boost-channel
       name: ./packages/boost-channel/lib/index.js
+    # Septieme ligne : le budget de contexte. Comme les six autres, elle est la
+    # copie A L'IDENTIQUE de `packages/boost-context-budget/cordis.patch.yml` —
+    # seul le chemin du `name` change (meme raison que ci-dessus).
+    - id: dsh-boost-context-budget
+      name: ./packages/boost-context-budget/lib/index.js

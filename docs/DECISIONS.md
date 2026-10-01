@@ -11,7 +11,7 @@ propositions **retirees** (un registre qui cache ses revirements est un document
 
 | # | decision | pourquoi | etat |
 |---|---|---|---|
-| D1 | Le livrable est un **bundle agregateur** : un paquet, un `cordis.patch.yml`, six lignes | `dsh-app-boot` fait `data.push(...insert)` sans deduplication : six bundles monteraient chaque ligne une fois — un seul les monte dans l'ordre voulu. (Le canal, sixieme ligne, a ete ajoute apres ; la decision, elle, n'a pas bouge) | construit, installe pour de vrai, **235 cas verts** (184 racine + 51 paquet) |
+| D1 | Le livrable est un **bundle agregateur** : un paquet, un `cordis.patch.yml`, sept lignes | `dsh-app-boot` fait `data.push(...insert)` sans deduplication : sept bundles monteraient chaque ligne une fois — un seul les monte dans l'ordre voulu. (Le canal, sixieme ligne, puis le budget de contexte, septieme, ont ete ajoutes apres ; la decision, elle, n'a pas bouge) | construit, installe pour de vrai, **208 cas verts** a la racine (dont 51 du canal et 24 du budget de contexte : le run racine collecte les suites des paquets, ne pas les additionner) |
 | D2 | **Un depot** : `packages/` (sources), `docs/`, `tools/`, racine = le bundle | consolidation demandee ; le test anti-derive empeche l'agregateur et les sous-paquets de diverger | construit (`dsh-boost`) |
 | D3 | Les sous-paquets gardent leur `dsh.bundle` (installables seuls) **et** l'agregateur insere les memes ids | aucune deduplication a l'insertion : installer les deux monterait chaque ligne **deux fois**. L'exclusion mutuelle est ecrite dans le README | construit |
 | D4 | **Boost possede l'arbre ; AgentTeams n'est pas l'orchestrateur** | un membre AgentTeams ne peut pas porter notre filtre d'outils (`members.js:539`, code en dur) : on perdrait la seule barriere machine du marche. Et sa section hote coute **5 171 caracteres** dans le prompt de chaque agent non-membre | decide sur mesure |
@@ -128,8 +128,8 @@ session longue a 0,85 et regarder si le decrochage reapparait. Le cout d'une com
 ## Partie 4 — Ce qui est etabli, quoi qu'on decide
 
 ```
-le livrable est installable et installe pour de vrai (une commande, six lignes, chacune une fois)
-la documentation est consolidee, les defauts mesures corriges, 235 cas verts (184 + 51)
+le livrable est installable et installe pour de vrai (une commande, sept lignes, chacune une fois)
+la documentation est consolidee, les defauts mesures corriges, 208 cas verts a la racine
 la coupure est ecrite et eprouvee sur un clone
 les mesures du corpus : 97,08 % de cache, 86 % de vacance de l'arbre, 0/139 contradictions,
                         silence p50 373 s, 8,2 % de refus de capacite
