@@ -97,7 +97,7 @@ Ils ne portent PLUS le code que le profil charge : depuis la coupure, le dump re
 consolide. Chacun porte un `FROZEN.md` qui dit ou est la source qui fait foi. La question n'est plus
 « quelle version est vivante » mais « garde-t-on l'historique git » — et personne n'a de distant.
 
-### 8. Le seuil de compaction automatique — **A ARBITRER** (ne le 1er octobre)
+### 8. Le seuil de compaction automatique — **ARBITRE : 0,85** (1er octobre, par l'utilisateur)
 
 Le test anti-derive a arrete **deux configurations contradictoires pour la meme ligne** — et les deux
 sont argumentees par des mesures :
@@ -114,13 +114,31 @@ cordis.patch.yml:144-179                        (DESSERREE, ecartee pour l'insta
   n'evoque PAS le decrochage observe a 792 000, qui est SOUS sa cible
 ```
 
-**Ce qui a ete fait** : la valeur prudente (0,5) est restauree dans le patch racine, l'invariant est
-retabli, et le desaccord reste ecrit en tete du bloc — il n'est pas tranche en silence.
+**ARBITRE le 1er octobre par l'utilisateur : 0,85**, pour le COUT. Ses sessions sont devenues couteuses et
+le taux bas y contribue — et le facteur entre les deux reglages vaut exactement 1,5x (744 000 estimes
+contre 500 000), pour une compaction mesuree a ~309 000 hors cache (1 544 712 pour 5 declenchements).
 
-**Ce qui reste a decider** : viser ~55 % (plus de compactions, marge de coherence) ou ~85 % (moins de
-compactions, au-dessus du seul point de decrochage jamais observe). Une mesure trancherait : rejouer une
-session longue a 0,85 et regarder si le decrochage reapparait. Le cout d'une compaction est mesure
-(1 544 712 hors cache pour 5 declenchements).
+```
+dsh-llm-deepseek/lib/types/defaults.d.ts:5   DEFAULT_CONTEXT_WINDOW = 1000000
+dsh-compaction-basic/lib/index.js:128         messageBudgetTokens = contextWindow - reservedCompletionTokens
+                             :132             thresholdTokens = floor(min(contextWindow x ratio, pressureBudget))
+0,85 -> min(850 000, 1 000 000 - 256 000) = 744 000 estimes   ~ 820 000 a 870 000 reels
+0,5  -> min(500 000, 744 000)             = 500 000 estimes   ~ 550 000 a 585 000 reels
+```
+
+**La valeur vit dans les DEUX fichiers a l'identique** (l'agregateur est la copie vivante, le sous-paquet
+en est la source) : `thresholdRatio: 0.85` + `headroomTokens: 0` + `maxTokens: 32768`.
+
+**RESERVE NON LEVEE**, ecrite dans les deux blocs : un decrochage a ete mesure a 792 000 (79 % de la
+fenetre) sous l'ancien reglage 0,8 — donc SOUS la cible de 85 %. Si une longue session derive, c'est le
+premier suspect. Le seuil est mesurable RETROACTIVEMENT : la taille estimee au declenchement est lisible
+dans `contextBreakdown` (validé a 0,25226 token par caractere), et 500 000 vs 744 000 se distinguent sans
+ambiguite.
+
+**Ce que ce revirement a appris** : le reglage « ecarte » n'etait pas un accident emporte par un
+`git add -A` — c'etait une edition MANUELLE de l'utilisateur, faite dans un FICHIER SOURCE du depot
+d'origine. Une seule intention, deux emplacements, dont un par megarde : de quoi croire a deux reglages
+deliberes concurrents la ou il n'y en avait qu'un.
 
 
 ---
@@ -135,16 +153,24 @@ les mesures du corpus : 97,08 % de cache, 86 % de vacance de l'arbre, 0/139 cont
                         silence p50 373 s, 8,2 % de refus de capacite
 ```
 
-Et quatre mecanismes sans equivalent trouve sur le marche — **trois construits, un seulement concu** :
+Et cinq mecanismes sans equivalent trouve sur le marche — **quatre construits, un seulement concu** :
 
 ```
 CONSTRUITS et vivants : le job possede par la racine (detached-jobs, porte du proprietaire)
                         le relais adaptatif (journal borne, avis de reglement)
                         la garde anti-surrogate (montee, 26 cas, journal de reparation)
+                        la garde du fork par occupation (7e ligne : exposition + refus + compaction
+                          differee ; admission MESUREE a la couture du registre)
 CONCU, PAS CONSTRUIT   : le frein hors cache. `tools.guard` n'apparait NULLE PART dans le code
                         (seulement dans ce document et EVOLUTIONS.md). C'est l'etape 2 de D20,
                         et elle n'est pas commencee.
 ```
+
+**Et une lecon transverse, payee cinq fois en une journee** : les defauts ne vivent pas dans les
+composants, ils vivent dans les COUTURES — l'adressage applique au stockage et pas a la lecture, le reveil
+decide au depot et jamais a l'arret, la frontiere des arguments en passoire, la place qui fuit quand la
+rotation reemet un identifiant, deux sondes qui ne mesuraient plus rien, et un schema de sortie qui ne
+declare pas un champ rendu. Aucun test unitaire ne les voyait : il fallait exercer la couture.
 
 Les trois construits sont des lignes hote : leur sort ne depend **pas** des choix ci-dessus.
 

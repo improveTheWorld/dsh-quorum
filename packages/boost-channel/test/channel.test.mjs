@@ -8,13 +8,19 @@
 // qui ont decide la conception — la retrogradation (§6), le plafond dur, la
 // borne par emetteur, la dedup par identite — pas seulement le chemin passant.
 //
-// Aucun harnais n'est requis : le canal prend ses dependances en parametres, donc
-// la politique de reveil se teste avec deux agents factices et une horloge.
+// Aucun harnais n'est requis pour les cas de REGLE : le canal prend ses dependances
+// en parametres, donc la politique de reveil se teste avec deux agents factices et
+// une horloge. UN cas fait exception, et il le dit : T-V1 monte le VRAI registre
+// d'outils ('dsh-tools') et passe par 'registry.execute(...)', parce que appeler
+// 'tool.execute(...)' passe AU-DESSUS de la couture qui valide le schema de sortie
+// — mesure sur le paquet voisin 'boost-context-budget' : un outil rendait un champ
+// non declare, le registre le REJETTAIT, et vingt-quatre cas restaient verts.
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { pathToFileURL } from 'node:url'
 import {
   DELIVERY_WINDOW_MS,
   KEEP_PER_SENDER,
@@ -1515,5 +1521,164 @@ test('T-D3 : inject:[echec] LEVE — lister un kind reveillant n est pas un no-o
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// T-V1 — la valeur REELLE, par le REGISTRE
+// ---------------------------------------------------------------------------
+
+/**
+ * Les modules du harnais, resolus comme 'test/aggregate.test.mjs' resout 'yaml'.
+ * Introuvables, c'est une ERREUR et jamais un saut : un controle qui ne peut pas
+ * s'executer ne doit pas ressembler a un controle qui passe.
+ */
+function harnessModules() {
+  return process.env.DSH_HARNESS
+    ?? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules')
+}
+
+/** Une attente courte : cordis active ses fibres hors du tour courant. */
+const tick = (ms) => new Promise((done) => setTimeout(done, ms))
+
+/**
+ * LE defaut qui a fabrique ce cas, mesure sur le paquet voisin : l'outil
+ * 'context_occupancy' rendait un champ ('sources') que son schema de sortie ne
+ * declarait pas, et 'dsh-tools' REJETTE toute cle non declaree
+ * ('dsh-tools/lib/index.js:468' : '"value.sources" is not a declared property
+ * (additionalProperties: false)', leve en 'ToolOutputError' : 'tool "..." returned
+ * invalid output'). Vingt-quatre cas passaient, l'outil n'avait JAMAIS fonctionne :
+ * tous appelaient 'tool.execute(...)', donc AU-DESSUS de la couture qui valide.
+ *
+ * Celui-ci monte le VRAI 'ToolRuntime', la ligne comme le profil la monte, laisse
+ * 'agent/created' installer les outils dans la surface de l'agent, et passe par
+ * 'registry.execute(...)'. Modele : 'packages/boost-context-budget/test/
+ * context-budget.test.mjs' cas T-C8, et son item 6 dans 'probe-fork-guard.mjs'.
+ *
+ * Les CINQ verdicts de 'channel_post' sont exerces : un schema peut etre juste sur
+ * un chemin et faux sur un autre.
+ */
+test('T-V1 : les trois outils rendent une valeur que le REGISTRE accepte', async () => {
+  const modules = harnessModules()
+  const entries = {
+    cordis: join(modules, '@deepseek-ai', 'cordis', 'lib', 'index.js'),
+    scope: join(modules, '@deepseek-ai', 'dsh-scope', 'lib', 'index.js'),
+    tools: join(modules, '@deepseek-ai', 'dsh-tools', 'lib', 'index.js'),
+  }
+  for (const [label, file] of Object.entries(entries)) {
+    assert.ok(existsSync(file), 'le harnais doit etre installe pour ce cas (' + label + ') : ' + file)
+  }
+  const { Context } = await import(pathToFileURL(entries.cordis).href)
+  const { createScope } = await import(pathToFileURL(entries.scope).href)
+  const ToolRuntime = (await import(pathToFileURL(entries.tools).href)).default
+
+  // Le JOURNAL part dans un dossier JETABLE, jamais dans le '$DSH_HOME' de la
+  // machine : la ligne recoit 'home' par sa configuration.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-channel-registry-'))
+  const root = new Context()
+  const makeAgent = (id, parent) => {
+    const calls = []
+    return {
+      id,
+      session: { id, header: parent === undefined ? {} : { parentSession: parent } },
+      status: 'idle',
+      calls,
+      inject: (message) => calls.push({ method: 'inject', message }),
+      send: (message, target, wakeup) => calls.push({ method: 'send', message, target, wakeup }),
+    }
+  }
+  const owner = makeAgent('session-root')
+  const child = makeAgent('session-child', 'session-root')
+  const agents = new Map([[owner.id, owner], [child.id, child]])
+  try {
+    await root.plugin({
+      name: 't-v1-services',
+      apply: (ctx) => {
+        // 'ToolRuntime' declare 'inject: ["systemPrompt"]' : sans ce service la
+        // ligne ne s'active pas et le registre reste introuvable.
+        ctx.provide('systemPrompt', { tools: () => {}, section: () => {}, getSectionOrder: () => 0 })
+        ctx.provide('agents', { get: (id) => agents.get(id), list: () => [...agents.values()] })
+      },
+    })
+    await root.plugin(ToolRuntime, { mode: 'native' })
+    let registry
+    await root.plugin({ name: 't-v1-view', inject: ['tools'], apply: (ctx) => { registry = ctx.tools } })
+    assert.ok(registry !== undefined, 'le registre d outils n a pas ete capture')
+
+    // La LIGNE HOTE, montee comme le profil la monte, puis l'annonce des agents :
+    // c'est 'agent/created' qui installe les outils dans LEUR surface.
+    owner.ctx = createScope(root, owner).ctx
+    child.ctx = createScope(root, child).ctx
+    await root.plugin({ name: 'dsh-boost-channel', inject: ['agents'], apply }, {
+      home: dir,
+      makeMessage: (envelope) => ({ id: 'registry:' + envelope.id, role: 'user', content: [] }),
+    })
+    await tick(30)
+    root.emit('agent/created', { agent: owner, source: 'startup' })
+    root.emit('agent/created', { agent: child, source: 'spawn' })
+    await tick(150)
+
+    const surface = registry.schemas(owner).map((schema) => schema.name)
+    for (const name of TOOL_NAMES) {
+      assert.ok(surface.includes(name), name + ' n est pas sur la surface de l agent : ' + surface.join(', '))
+    }
+
+    let calls = 0
+    const via = (name, args, agent) => registry.execute({
+      callId: 't-v1-' + (++calls),
+      name,
+      arguments: args,
+      agent,
+      signal: new AbortController().signal,
+    })
+    /** La valeur RENDUE par le registre — un rejet du schema fait ECHOUER le cas. */
+    const ok = (result, label) => {
+      assert.equal(result.isError, false, label + ' : le registre a REJETE la valeur rendue — ' + String(result.error?.message))
+      return result.value
+    }
+
+    // --- channel_post : les CINQ verdicts, chacun par le REGISTRE -------------
+    const self = ok(await via('channel_post', { kind: 'decouverte', summary: 'la racine se parle' }, owner), 'self')
+    assert.equal(self.wake, 'self')
+    assert.equal(self.duplicate, false)
+    assert.equal(typeof self.id, 'string')
+    assert.equal(typeof self.state, 'string')
+    assert.deepEqual(Object.keys(self.budget).sort(), ['ordinary', 'reserved'], 'le budget declare ses DEUX bourses')
+
+    assert.equal(ok(await via('channel_post', { kind: 'avancement', summary: 'etape 1' }, child), 'injected').wake, 'injected')
+    assert.equal(ok(await via('channel_post', { kind: 'avancement', summary: 'etape 2' }, child), 'injected').wake, 'injected')
+    assert.equal(ok(await via('channel_post', { kind: 'avancement', summary: 'etape 3' }, child), 'throttled').wake, 'throttled')
+    assert.equal(owner.calls.length, 2, 'deux injections, pas trois')
+
+    // --- channel_subscribe : le proprietaire SEUL -----------------------------
+    const policy = ok(await via('channel_subscribe', { inject: [] }, owner), 'subscribe proprietaire')
+    assert.deepEqual(policy, { inject: [], refused: false, why: '' })
+
+    assert.equal(ok(await via('channel_post', { kind: 'decouverte', summary: 'apres le filtre' }, child), 'filtered').wake, 'filtered')
+    // LA CLAUSE NON NEGOCIABLE, par le registre : une question passe sous un filtre vide.
+    assert.equal(ok(await via('channel_post', { kind: 'question', summary: 'bloque ?' }, child), 'pending').wake, 'pending')
+
+    const refused = ok(await via('channel_subscribe', { inject: ['decouverte'] }, child), 'subscribe enfant')
+    assert.equal(refused.refused, true)
+    assert.equal(refused.why, 'not-owner')
+    assert.deepEqual(refused.inject, [], 'la politique du proprietaire n a pas bouge')
+
+    // Un ARGUMENT refuse n'est pas un retour invalide : l'erreur remonte au registre.
+    const bad = await via('channel_subscribe', { inject: ['echec'] }, owner)
+    assert.equal(bad.isError, true, 'lister un kind reveillant doit lever jusque dans le registre')
+    assert.match(String(bad.error?.message), /cannot filter/)
+
+    // --- channel_read : l'adresse --------------------------------------------
+    const page = ok(await via('channel_read', {}, owner), 'read proprietaire')
+    assert.equal(page.count, 6, 'six messages stockes, tous rendus au proprietaire')
+    assert.deepEqual(page.envelopes.map((row) => row.kind),
+      ['decouverte', 'avancement', 'avancement', 'avancement', 'decouverte', 'question'])
+    assert.equal(page.envelopes.filter((row) => row.wake_pending === true).length, 1, 'une seule attente d arret')
+    const childPage = ok(await via('channel_read', {}, child), 'read enfant')
+    assert.equal(childPage.count, 0, 'un enfant ne voit pas ce qui ne lui est pas adresse')
+  } finally {
+    try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 
 
