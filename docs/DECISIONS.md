@@ -143,6 +143,41 @@ deliberes concurrents la ou il n'y en avait qu'un.
 
 ---
 
+### 9. La garde du fork par occupation — **DESARMEE** (1er octobre), a reprendre
+
+Deux falsifications successives ont refute la MESURE sur la vraie pile (vraie `Session`, vrai
+`TokenMeter`, vrai `ToolRuntime`, vrai registre). La garde refusait un fork a 75 %, puis l'autorisait
+apres la compaction que le plugin avait lui-meme armee — l'enfant heritant EXACTEMENT ces 75 %.
+
+```
+le fork tranche des POSITIONS DE JOURNAL   events.slice(0, lastEnd.seq + 1)
+la mesure lisait des PROJECTIONS           prefix-usage s'arrete au dernier echantillon du
+                                            fournisseur, DONC AVANT les tool/result du tour clos ;
+                                            la surface est detruite par une compaction posterieure
+                                            -> LES DEUX VUES TOMBENT ENSEMBLE, un max ne protege de rien
+mesure inverse, aussi observee             : 70 000 herites annonces pour 5 tokens de surface close
+```
+
+Le harnais lui-meme emet cette operation : `dsh-compaction-tool-result-pruner` ecrit
+`surfaceOp:{op:'replace', startSeq, endSeq}` sur un `tool/result` — ce n'est pas un cas d'ecole.
+
+**Ce qui est fait** : la ligne est DESARMEE (`disabled: true`, verifie sautee au chargement par
+`dsh-app-boot/lib/index.js:3134`), dans les deux patches a l'identique. Le code, les 30 cas et la sonde
+restent en place.
+
+**Pourquoi desarmer plutot que laisser** : elle echouait OUVERTE (elle laissait passer ce qu'elle venait
+de refuser) et fermait A TORT dans l'autre sens — au prix d'une compaction a ~309 000 hors cache. Un
+garde qui ne garde pas est pire qu'aucun garde, parce qu'il rassure.
+
+**Ce qui la rendrait juste** : mesurer **les evenements du prefixe que le fork tranche**, pas une
+projection. Le fait est etabli (`completedTurnPrefix` rend le prefixe complet meme apres compaction), la
+source manque. **Et l'exposition du nom demeure** : la garde s'indexait sur `exec.name`, une valeur de
+configuration — le verificateur a identifie un AUTRE point de coupure ou le fournisseur est connu
+(`ctx.subagents.registerProvider`, et `inheritsParentContext = true` sur le provider du fork), qui
+reconnaitrait ce qui herite par une PROPRIETE et non par un nom.
+
+---
+
 ## Partie 4 — Ce qui est etabli, quoi qu'on decide
 
 ```
