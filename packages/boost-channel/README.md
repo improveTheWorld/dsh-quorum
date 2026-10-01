@@ -8,6 +8,10 @@ Le canal entre un enfant et le proprietaire de son arbre. Specification complete
     node tools/probe-stop.mjs          # quel evenement marque l'arret (mesure)
     node tools/probe-mount.mjs         # la ligne HOTE installe par agent (mesure)
 
+Un SEUL cas exige le harnais installe ('@deepseek-ai/dsh', resolu par 'DSH_HARNESS' ou
+'%APPDATA%\npm\node_modules') : **T-V1**, qui monte le vrai 'ToolRuntime' et passe par
+'registry.execute(...)'. Tous les autres n'ont besoin de rien.
+
 ## Ce que le canal transporte, et ce qu'il refuse de transporter
 
 Une enveloppe STRUCTUREE, jamais la charge utile (D13) :
@@ -323,6 +327,29 @@ Trois regles, tenues par T-R1, T-R2 et T-R4 :
 SEUL fichier actif dans 'load()' (rendre 'this.readLines(this.file)' sans concatener '.1'), puis
 lancer 'node --test test/channel.test.mjs' : T-R1 tombe, la lecture ne rend plus que la generation
 vivante.
+
+## La valeur RENDUE passe le REGISTRE (T-V1)
+
+Mesure faite sur le paquet voisin, et qui vaut pour celui-ci : un outil rendait un champ
+('sources') que son **schema de sortie ne declarait pas**. 'dsh-tools' valide la valeur au retour et
+REJETTE toute cle non declaree ('dsh-tools/lib/index.js:468' : `"value.sources" is not a declared
+property (additionalProperties: false)`, leve en `tool "..." returned invalid output`). **Vingt-quatre
+cas passaient, l'outil n'avait JAMAIS fonctionne en usage reel** — parce que tous appelaient
+'tool.execute(...)', c'est-a-dire **au-dessus** de la couture qui valide.
+
+**T-V1** monte donc le VRAI 'ToolRuntime' ('dsh-tools'), la ligne comme le profil la monte, laisse le
+vrai 'agent/created' installer les trois outils dans la surface de l'agent, puis appelle
+'registry.execute({ callId, name, arguments, agent, signal })'. Il exerce **les cinq verdicts** de
+'channel_post' ('self', 'injected', 'throttled', 'filtered', 'pending') parce qu'un schema peut etre
+juste sur un chemin et faux sur un autre, plus 'channel_read' (proprietaire et enfant) et
+'channel_subscribe' (proprietaire, enfant refuse, argument qui LEVE). Le journal part dans un
+'mkdtemp' passe en configuration ('home'), jamais dans le '$DSH_HOME' de la machine.
+
+**Falsification** (T-V1 doit ECHOUER) : sur une copie jetable hors du depot, ajouter une cle NON
+DECLAREE a la valeur rendue — dans 'post', rendre
+'{ id, state, duplicate, wake, budget, sources: { kind, wake } }' — puis lancer
+'node --test test/channel.test.mjs' : UN SEUL cas tombe, T-V1, avec le message du registre
+('"value.sources" is not a declared property').
 
 ## Les compteurs de sante (§7), exposes et journalises
 
