@@ -1,0 +1,23 @@
+{
+  "name": "@local/dsh-boost-channel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Return channel of Boost mode: an append-only, per-tree JSONL store of STRUCTURED envelopes (never the payload), four declared kinds against four runtime-derived states, a wake policy in which a question whose derived state is running does not wake anyone, and the health counters defined before the first line.",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

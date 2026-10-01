@@ -1,6 +1,6 @@
 /**
  * Anti-drift test: the aggregate patch at the repository root must be exactly
- * the union of the five package patches it claims to aggregate.
+ * the union of the six package patches it claims to aggregate.
  *
  * Why it exists. `dsh-app-boot/lib/index.js:87` appends every inserted row with
  * `data.push(...insert)` and performs no deduplication, so the root patch can
@@ -29,8 +29,16 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
 const ROOT_PATCH = join(ROOT, 'cordis.patch.yml')
 
-/** The five sub-packages, in the order the root patch lists their rows. */
-const PACKAGES = ['boost-mode', 'boost-relay', 'boost-status', 'detached-jobs', 'guard-surrogate']
+/**
+ * The six sub-packages, in the order the root patch lists their rows.
+ *
+ * `boost-channel` was added with the sixth row. It carries its OWN
+ * `cordis.patch.yml`, exactly like the five others, so this test keeps its full
+ * strength: the root insert is compared to the union of the SIX sub-package
+ * patches, and the comparison is not relaxed anywhere. A package without a patch
+ * would have forced a weaker test; that is why the package has one.
+ */
+const PACKAGES = ['boost-mode', 'boost-relay', 'boost-status', 'detached-jobs', 'guard-surrogate', 'boost-channel']
 
 /** The exact custom tag the harness registers, so `!!js` resolves to its text. */
 const YAML_JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value) => value }
@@ -123,16 +131,16 @@ for (const source of sources) {
   }
 }
 
-test('the root patch is ONE insert entry carrying the five Boost rows', () => {
+test('the root patch is ONE insert entry carrying the six Boost rows', () => {
   assert.equal(root.entries.length, 1, 'the root patch must hold exactly one top-level entry')
   assert.equal(root.inserts.length, 1, 'that entry must be the single insert: entry')
-  assert.equal(root.rows.length, 5, 'the insert: list must carry exactly five rows')
+  assert.equal(root.rows.length, PACKAGES.length, 'the insert: list must carry exactly one row per sub-package')
   for (const source of sources) {
     assert.equal(source.parsed.inserts.length, 1, source.patchPath + ' must hold exactly one insert: entry')
   }
 })
 
-test('the root patch inserts the same five ids as the sub-packages, each exactly once', () => {
+test('the root patch inserts the same six ids as the sub-packages, each exactly once', () => {
   assert.deepEqual(
     [...rootById.keys()].sort(),
     [...sourceRows.keys()].sort(),
@@ -141,8 +149,8 @@ test('the root patch inserts the same five ids as the sub-packages, each exactly
   assert.equal(rootById.size, root.rows.length, 'no id may appear twice in the root patch')
   assert.deepEqual(
     root.rows.map((row) => row.id),
-    ['preset-boost', 'boost-job-relay', 'boost-status-command', 'dsh-detached-jobs', 'dsh-guard-surrogate'],
-    'the root patch must list the five rows in the documented order'
+    ['preset-boost', 'boost-job-relay', 'boost-status-command', 'dsh-detached-jobs', 'dsh-guard-surrogate', 'dsh-boost-channel'],
+    'the root patch must list the six rows in the documented order'
   )
 })
 

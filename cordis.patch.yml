@@ -1,4 +1,4 @@
-# Couche bundle agregee Boost : UNE entree `insert:` portant les CINQ lignes
+# Couche bundle agregee Boost : UNE entree `insert:` portant les SIX lignes
 # du mode Boost, dans cet ordre.
 #
 # Un bundle = un paquet dont `package.json` porte
@@ -11,13 +11,13 @@
 # `id` montent la ligne DEUX FOIS : preset monte deux fois, outil duplique.
 # L'agregateur et les sous-paquets s'excluent donc mutuellement.
 #
-# `name` est resolu RELATIVEMENT A CE FICHIER : les quatre lignes fichier
+# `name` est resolu RELATIVEMENT A CE FICHIER : les cinq lignes fichier
 # portent donc `./packages/<paquet>/lib/index.js`. La ligne `preset-boost`
 # porte un nom de paquet npm, resolu par le chargeur de modules.
 #
-# Les cinq lignes sont recopiees A L'IDENTIQUE depuis les cinq
+# Les six lignes sont recopiees A L'IDENTIQUE depuis les six
 # `cordis.patch.yml` d'origine (memes `id`, memes `name`, memes `config`).
-# Seul ecart : le chemin des quatre `name` fichier. `test/aggregate.test.mjs`
+# Seul ecart : le chemin des cinq `name` fichier. `test/aggregate.test.mjs`
 # exige cette egalite et echoue a la moindre derive.
 
 - insert:
@@ -397,3 +397,9 @@
       name: ./packages/guard-surrogate/lib/index.js
       config:
         enabled: true
+    # Sixieme ligne : le canal de retour. Comme les cinq autres, elle est la
+    # copie A L'IDENTIQUE de `packages/boost-channel/cordis.patch.yml` — seul le
+    # chemin du `name` change, parce qu'un patch resout ses `name` relativement a
+    # SON fichier.
+    - id: dsh-boost-channel
+      name: ./packages/boost-channel/lib/index.js

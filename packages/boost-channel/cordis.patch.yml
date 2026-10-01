@@ -1,0 +1,17 @@
+# Canal de retour du mode Boost : 'channel_post' et 'channel_read'.
+#
+# Niveau HOST, et c'est une condition de fonctionnement, pas un detail : la ligne
+# capture le service 'agents' NON scopé, seule portee depuis laquelle un enfant
+# et son proprietaire sont tous deux visibles, et installe ses deux outils DANS
+# LA SURFACE DE CHAQUE AGENT depuis son listener 'agent/created'.
+#
+# Pourquoi pas une ligne DANS le preset : un outil enregistre depuis la portee
+# d'une ligne atteint le service 'tools', jamais la surface composee d'un agent.
+# C'est mesure deux fois (voir 'packages/boost-mode/cordis.patch.yml:369-384') et
+# repris ici : la portee d'une ligne ne voit pas l'agent. Le motif qui fonctionne
+# est celui de 'packages/detached-jobs/lib/index.js:985-1026'.
+#
+# Le fichier du preset n'est de toute facon pas dans le perimetre de ce paquet.
+- insert:
+    - id: dsh-boost-channel
+      name: ./lib/index.js
