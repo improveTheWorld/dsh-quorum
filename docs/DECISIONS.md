@@ -11,7 +11,7 @@ propositions **retirees** (un registre qui cache ses revirements est un document
 
 | # | decision | pourquoi | etat |
 |---|---|---|---|
-| D1 | Le livrable est un **bundle agregateur** : un paquet, un `cordis.patch.yml`, cinq lignes | `dsh-app-boot` fait `data.push(...insert)` sans deduplication : cinq bundles monteraient chaque ligne une fois — un seul les monte dans l'ordre voulu | construit, installe pour de vrai, 132 cas verts |
+| D1 | Le livrable est un **bundle agregateur** : un paquet, un `cordis.patch.yml`, six lignes | `dsh-app-boot` fait `data.push(...insert)` sans deduplication : six bundles monteraient chaque ligne une fois — un seul les monte dans l'ordre voulu. (Le canal, sixieme ligne, a ete ajoute apres ; la decision, elle, n'a pas bouge) | construit, installe pour de vrai, **235 cas verts** (184 racine + 51 paquet) |
 | D2 | **Un depot** : `packages/` (sources), `docs/`, `tools/`, racine = le bundle | consolidation demandee ; le test anti-derive empeche l'agregateur et les sous-paquets de diverger | construit (`dsh-boost`) |
 | D3 | Les sous-paquets gardent leur `dsh.bundle` (installables seuls) **et** l'agregateur insere les memes ids | aucune deduplication a l'insertion : installer les deux monterait chaque ligne **deux fois**. L'exclusion mutuelle est ecrite dans le README | construit |
 | D4 | **Boost possede l'arbre ; AgentTeams n'est pas l'orchestrateur** | un membre AgentTeams ne peut pas porter notre filtre d'outils (`members.js:539`, code en dur) : on perdrait la seule barriere machine du marche. Et sa section hote coute **5 171 caracteres** dans le prompt de chaque agent non-membre | decide sur mesure |
@@ -77,9 +77,9 @@ contre-exemple), l'instance tracee avec ses enregistrements bruts, la couture `t
 precedent en arbre, la couture REJETEE (`llm/stream`, qui casserait l'invariant), le residu a sa vraie
 taille, et une reproduction minimale. Reste : le poster.
 
-### 4. Construire le canal maintenant ?
-C'est le seul chantier qui debloque les trois autres (verdict, profondeur, budget lisible). Le document
-de conception est ecrit ; l'implementation reste a faire, avec la metrique de sante des le premier jour.
+### 4. Construire le canal ? — **FAIT, verifie PASS** (2026-10-01, cf. Partie 6)
+Sept regles anti-brouillage tiennent, cinq falsifications successives, 184 cas racine et 51 au paquet.
+Ce qui restait — que le canal SERVE — a demande une ligne de persona, pas du code.
 
 ### 5. Publier ? — **DECIDE : NON** (1er octobre)
 Decision de l'utilisateur : **garder pour soi**, faire evoluer et stabiliser tranquillement, et ne partager
@@ -91,8 +91,11 @@ elle sert de reference le jour ou ce seuil serait atteint.
 Cinquieme plugin, **hors `CodeSource`** et hors git (`profiles/local-plugins/`) : c'est de l'infra de
 harnais, pas du mode Boost. Il reste ou il est, et le HANDOVER le documente.
 
-### 7. Que faire des cinq depots d'origine apres la coupure ?
-Ils portent encore le code que le profil charge. Les retirer proprement — ou les garder comme historique ?
+### 7. Que faire des cinq depots d'origine apres la coupure ? — **DEPLACE, purement archivistique**
+Ils ne portent PLUS le code que le profil charge : depuis la coupure, le dump resout tout sous
+`profiles\web\node_modules\@local\dsh-boost\packages\...`, c'est-a-dire par la jonction vers le depot
+consolide. Chacun porte un `FROZEN.md` qui dit ou est la source qui fait foi. La question n'est plus
+« quelle version est vivante » mais « garde-t-on l'historique git » — et personne n'a de distant.
 
 ### 8. Le seuil de compaction automatique — **A ARBITRER** (ne le 1er octobre)
 
@@ -125,16 +128,25 @@ session longue a 0,85 et regarder si le decrochage reapparait. Le cout d'une com
 ## Partie 4 — Ce qui est etabli, quoi qu'on decide
 
 ```
-le livrable est installable et installe pour de vrai (une commande, cinq lignes, chacune une fois)
-la documentation est consolidee, les defauts mesures corriges, 132 cas verts
+le livrable est installable et installe pour de vrai (une commande, six lignes, chacune une fois)
+la documentation est consolidee, les defauts mesures corriges, 235 cas verts (184 + 51)
 la coupure est ecrite et eprouvee sur un clone
 les mesures du corpus : 97,08 % de cache, 86 % de vacance de l'arbre, 0/139 contradictions,
                         silence p50 373 s, 8,2 % de refus de capacite
 ```
 
-Et quatre mecanismes sans equivalent trouve sur le marche : **le frein hors cache**, **le job possede par
-la racine**, **le relais adaptatif**, **la garde anti-surrogate**. Les trois premiers sont des lignes hote :
-leur sort ne depend **pas** des choix ci-dessus.
+Et quatre mecanismes sans equivalent trouve sur le marche — **trois construits, un seulement concu** :
+
+```
+CONSTRUITS et vivants : le job possede par la racine (detached-jobs, porte du proprietaire)
+                        le relais adaptatif (journal borne, avis de reglement)
+                        la garde anti-surrogate (montee, 26 cas, journal de reparation)
+CONCU, PAS CONSTRUIT   : le frein hors cache. `tools.guard` n'apparait NULLE PART dans le code
+                        (seulement dans ce document et EVOLUTIONS.md). C'est l'etape 2 de D20,
+                        et elle n'est pas commencee.
+```
+
+Les trois construits sont des lignes hote : leur sort ne depend **pas** des choix ci-dessus.
 
 ---
 
@@ -196,6 +208,16 @@ Verdict final : **PASS**. Racine 184 cas, paquet 51, deux sondes vertes.
 
 ### Ce qui reste avant que le canal SERVE
 
-Le canal est monte, borne, filtre et verifie. **Aucun agent n'est encore charge de s'en servir** : sans une consigne dans les personas, c'est une infrastructure sans usager. Cout mesure : **~610 caracteres** (2 lignes au capitaine, 1 ligne par role), contre les **5 171** du protocole AgentTeams refuse a D4. Les descriptions d'outils portent deja le COMMENT ; la persona n'a besoin que du QUAND.
+Le canal est monte, borne, filtre, verifie, **et les personas le nomment** depuis le 2026-10-01 : une
+ligne au capitaine (« tire-le avant de declarer une etape finie »), une par role (« si la tache depasse
+quelques minutes, publie un avancement quand tu changes de phase »). Cout : ~870 caracteres, contre les
+**5 171** du protocole AgentTeams refuse a D4.
+
+**Mais la mesure du premier jour est un ZERO** : sur deux enfants (taches de ~2 minutes), aucun depot.
+Et c'est *correct* — sur une tache courte, l'avis de reglement EST le rapport. Le dispositif n'a de valeur
+que la ou le pere est aveugle : au-dela de quelques minutes (silence p50 mesure : **373 s**, max **112 min**).
+La premiere consigne, une disposition (« declare ce que tu trouves au fil de l'eau »), n'a rien produit ;
+elle est devenue un **declencheur** (« si la tache depasse quelques minutes »). Ce qui reste a etablir :
+qu'un enfant s'en serve, et ce que cela coute.
 
 

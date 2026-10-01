@@ -135,6 +135,10 @@
               toolResultPruner: true
             config:
               # !!! CONFLIT NON TRANCHE — voir docs/DECISIONS.md, choix ouvert n°8.
+# Le reglage ecarte n'est PAS un accident : il vit, avec le meme raisonnement, dans l'ancien
+# depot `C:\CodeSource\dsh-boost-mode\cordis.patch.yml` (L169-171), que le profil `web` citait
+# comme reference. Deux reglages DELIBERES et documentes, faits a des moments differents, dont
+# aucun n'a vu l'argument de l'autre.
               # Le raisonnement ci-dessous vise ~85 % de la fenetre pour le COUT. Il
               # n'evoque PAS l'observation consignee en face, dans
               # packages/boost-mode/cordis.patch.yml:155 : « une session a repondu en
