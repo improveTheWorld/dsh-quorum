@@ -71,18 +71,21 @@ prompt de CHAQUE agent non-membre** — tes verificateurs compris, dont l'indepe
 Reouvrable en une commande si le DAG ou le panneau venaient a manquer : c'est justement pourquoi on ne le
 monte pas par defaut — une ligne s'ajoute en une commande, elle ne se retire pas aussi facilement.
 
-### 3. Remonter le defaut de la garde anti-surrogate en amont ? — **ta decision**
-Valeur maximale, cout de maintenance nul. Demande un rapport de defaut avec nos mesures (3 journaux sur
-182, 0 contre-exemple, HTTP 400 en cascade).
+### 3. Remonter le defaut de la garde anti-surrogate en amont ? — **DECIDE : OUI · rapport ecrit**
+`docs/UPSTREAM-SURROGATE.md` est pret a poster : impact mesure (3 journaux sur 182, ces 3 seuls, 0
+contre-exemple), l'instance tracee avec ses enregistrements bruts, la couture `tools/post-execute` et son
+precedent en arbre, la couture REJETEE (`llm/stream`, qui casserait l'invariant), le residu a sa vraie
+taille, et une reproduction minimale. Reste : le poster.
 
 ### 4. Construire le canal maintenant ?
 C'est le seul chantier qui debloque les trois autres (verdict, profondeur, budget lisible). Le document
 de conception est ecrit ; l'implementation reste a faire, avec la metrique de sante des le premier jour.
 
-### 5. Publier quelque chose ?
-Etude faite : le paquet tel quel arriverait dans un marche sature (6 469 paquets `dsh-plugin`, un concurrent
-direct plus mur). Les actifs reellement uniques : le frein hors cache, le job possede par la racine, le
-relais adaptatif, et **les mesures** — que personne ne publie.
+### 5. Publier ? — **DECIDE : NON** (1er octobre)
+Decision de l'utilisateur : **garder pour soi**, faire evoluer et stabiliser tranquillement, et ne partager
+que le jour ou une **efficacite mesuree** serait etablie — en consommation, en justesse d'execution et en
+stabilite. L'etude de marche reste au dossier (6 469 paquets `dsh-plugin`, un concurrent direct plus mur) :
+elle sert de reference le jour ou ce seuil serait atteint.
 
 ### 6. `dsh-auto-update` dans le depot consolide ? — **DECIDE : NON**
 Cinquieme plugin, **hors `CodeSource`** et hors git (`profiles/local-plugins/`) : c'est de l'infra de
