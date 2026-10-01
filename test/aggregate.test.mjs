@@ -111,6 +111,18 @@ function canonical(value) {
   return JSON.stringify(value ?? null)
 }
 
+/**
+ * The whole row except `name` — the ONLY key allowed to differ, because the root row names a folded
+ * path (`./packages/<pkg>/lib/index.js`) where the source names a sibling module. Every OTHER key is
+ * copied verbatim, and the loader honours at least one of them: `disabled: true` unmounts a row
+ * silently (`dsh-app-boot/lib/index.js:2093`). Comparing `config` alone let that pass.
+ */
+function withoutName(row) {
+  const copy = { ...row }
+  delete copy.name
+  return canonical(copy)
+}
+
 /** A `name` that is a path, as opposed to an npm specifier like '@scope/pkg'. */
 function isPathName(name) {
   return typeof name === 'string' && (name.startsWith('./') || name.startsWith('../'))
@@ -162,6 +174,18 @@ test('every root row carries the config of its source row, compared as canonical
       canonical(row.config),
       canonical(source.row.config),
       'config of "' + id + '" diverged between ' + ROOT_PATCH + ' and ' + source.patchPath
+    )
+  }
+})
+
+test('every root row carries the ROW of its source, keys other than name included', () => {
+  for (const [id, source] of sourceRows) {
+    const row = rootById.get(id)
+    assert.ok(row, 'the root patch must insert id "' + id + '"')
+    assert.equal(
+      withoutName(row),
+      withoutName(source.row),
+      'row "' + id + '" carries a key its source does not, or the reverse — `disabled` alone would unmount the line silently'
     )
   }
 })

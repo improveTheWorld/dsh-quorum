@@ -105,7 +105,7 @@ packages/boost-mode/cordis.patch.yml:152-158   (PRUDENTE, retenue)
   « Mesure : l'agent avait deja decroche a ce niveau (une session a repondu en CHINOIS a 792 000) »
   0,5 -> ~500 000 estimes ~ 550 000 reels : « la cible voulue »
 
-cordis.patch.yml:138-166                        (DESSERREE, ecartee pour l'instant)
+cordis.patch.yml:144-179                        (DESSERREE, ecartee pour l'instant)
   seuil = floor(min(W x ratio, W - O - headroomTokens)), O = 256 000 -> plafond 744 000
   0,85 + headroomTokens 0 + maxTokens 32768 -> cible « ~85 % » de la fenetre, pour le COUT
   n'evoque PAS le decrochage observe a 792 000, qui est SOUS sa cible

@@ -136,7 +136,7 @@
               # !!! CONFLIT NON TRANCHE — voir docs/DECISIONS.md, choix ouvert n°8.
               # Le raisonnement ci-dessous vise ~85 % de la fenetre pour le COUT. Il
               # n'evoque PAS l'observation consignee en face, dans
-              # packages/boost-mode/cordis.patch.yml:154 : « une session a repondu en
+              # packages/boost-mode/cordis.patch.yml:155 : « une session a repondu en
               # chinois a 792 000 », soit 79 % — SOUS la cible proposee ici. Le test
               # anti-derive a arrete la divergence (deux configurations pour la meme
               # ligne) ; la valeur PRUDENTE est restauree en attendant l'arbitrage.

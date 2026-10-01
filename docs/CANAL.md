@@ -67,13 +67,28 @@ kind  (le fils DECLARE)  : decouverte · avancement · question · resultat · e
 etat  (le runtime DERIVE) : running · blocked · done · failed
 ```
 
-« Urgent » n'est pas un niveau : c'est l'etat `blocked` ou `failed`. Un enfant bloque **est** bloque —
-il a cesse de produire.
+« Urgent » n'est pas un niveau. Un enfant bloque **est** bloque — il a cesse de produire.
 
 **Mesure du 1er octobre** : l'etat NE PEUT PAS porter l'echec a lui seul. Un enfant qui poste le fait
 DEPUIS un appel d'outil — donc en travaillant, donc `running` — voit son etat derive valoir `running` au
-depot. L'echec doit donc etre un **kind declare** : `echec`. C'est le seul kind qui porte l'urgence
-lui-meme, et il reveille quel que soit l'etat d'arret.
+depot. L'echec doit donc etre un **kind declare** : `echec`, le seul kind qui porte l'urgence lui-meme.
+
+### La regle d'eligibilité, ecrite (elle ne se deduit pas de la table)
+
+```
+eligibilite = le KIND SEUL : question | resultat | echec
+              decouverte et avancement ne reveillent JAMAIS, quel que soit l'etat
+
+l'etat DECIDE, une fois l'eligibilite acquise :
+              echec                         -> reveil
+              question | resultat + blocked -> reveil
+              resultat + running            -> reste en ATTENTE (le §4 exige done)
+```
+
+Un `avancement` dont l'etat derive vaut `failed` ne reveille donc **pas** : c'est un fait qui se declare
+avec le kind `echec`, jamais un effet de bord de l'etat. Sans cette porte, un enfant dont un outil a
+echoue une fois pourrait reveiller son proprietaire avec du battement de coeur — mesure sur la revision
+`7969329`, corrige depuis.
 
 ## 4. La politique de reveil — le seul enjeu
 
