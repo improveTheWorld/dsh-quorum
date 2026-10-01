@@ -175,6 +175,35 @@ source manque. **Et l'exposition du nom demeure** : la garde s'indexait sur `exe
 configuration — le verificateur a identifie un AUTRE point de coupure ou le fournisseur est connu
 (`ctx.subagents.registerProvider`, et `inheritsParentContext = true` sur le provider du fork), qui
 reconnaitrait ce qui herite par une PROPRIETE et non par un nom.
+**RESOLU le 1er octobre, en fin de journee** — trois falsifications, trois defauts reels, puis la mesure juste.
+
+```
+1re version : somme des noeuds de SURFACE retenus  -> REFUTEE (la compaction les retire : mesure a 0,
+              la garde S OUVRAIT sur le fork qu elle venait de refuser)
+2e version  : max(surface, prefix-usage)           -> REFUTEE (les DEUX vues tombent ensemble)
+3e version  : restore(...) borne a la frontiere    -> l EGALITE tient contre un ENFANT REEL,
+              reproduite sur la session 018354d9 aux cuts 1821/3332/5898
+defaut final: le REPLI rendait un chiffre faux (13 849 au lieu de 542 393, sous-mesure 39x)
+              -> EFFACE du code. Quand restore manque ou jette : NULL, verdict unknown,
+                 fork-unguarded why/error, et LA GARDE S ABSTIENT.
+```
+
+**Et la garde ne s'indexe plus sur un nom** : elle enveloppe `start`/`prepareContinuable` des providers dont
+`inheritsParentContext === true`, au seam `subagent/provider-added`. Un provider renomme qui herite est
+refuse, parce qu'il herite — mesure. `forkToolNames` reste un repli.
+
+**Mesure en direct sur la session racine, apres montage :**
+
+```
+inheritedTokens : 440 633   windowTokens : 1 000 000   ratio : 44,06 %   seuil : 60 %   verdict : OK
+sources : inherited=restore-boundary  window=context-pressure  frontiere seq=6057
+```
+
+**Et le fait du harnais qui donne a cette garde sa vraie raison d'etre** : le fork tranche le journal BRUT.
+Un pere compacte transmet donc a son enfant PLUS qu'il ne detient — mesure : surface vive 16 898, heritage
+541 857, soit 32x. La garde ne protege pas le pere de son plein ; elle protege **l'enfant d'un heritage
+qu'il n'a pas demande**.
+
 
 ---
 
