@@ -207,6 +207,52 @@ qu'il n'a pas demande**.
 
 ---
 
+---
+
+## Partie 7 — Les points de suspension, eprouves (1er octobre, 19 h)
+
+### Le FORK REEL — jamais exerce avant ce soir
+
+```
+le pere mesure     : 463 106 tokens · 46,31 % · frontiere seq 6114 · verdict ok · restore-boundary
+la garde           : LAISSE PASSER  (elle n'avait jamais dit `ok` en vrai)
+l enfant re-mesure : 463 106 tokens · 0,463106 · frontiere 6114      -> DELTA = 0 TOKEN
+l heritage est PROUVE : l enfant cite trois faits qu il n a pas pu lire sur le disque
+                        (dernier commit a07e302 · 217 cas racine / 32 au paquet · le nom de la garde)
+```
+
+L'egalite `mesure == ce que l'enfant recoit` est desormais verifiee **du cote de l'enfant**, sur un vrai
+fork — et non plus contre une `Session` fabriquee pour un test. C'est la seule verification possible de
+cette egalite, et elle est faite.
+
+### Les BORNES DU CANAL — mesurees a zero toute la journee, enfin exercees
+
+```
+7 avancements du meme enfant : 2 injected (budget ordinary 1 -> 0), 5 throttled
+l enfant lit                 : count=0                          -> l adressage tient
+le proprietaire tire         : count=10, les SEPT sont la       -> rien n est perdu
+compteurs                    : posted=7  delivered=2  throttled=5  throttled_by_sender={ffc98724:5}
+```
+
+La borne mord **a 2 par emetteur**, exactement comme concu ; le refus est **stocke et tirable** ; et le
+bavard est **nomme**. C'est la regle du §2 tenue de bout en bout : *borner par construction, puis rendre
+visible ce qui survit quand meme.* Le proprietaire n'a recu que **deux lignes** pour sept messages.
+
+### Ce qui RESTE ouvert, et qu'un test ne fermerait pas
+
+- **Les quatre constantes du jeton** (300 s · 2 · 4 · 3) ne se calibrent que sur des **jours de trafic
+  reel**. Un test les validerait contre des chiffres inventes.
+- **Multi-process** : « jamais perdu » est FAUX — une course a deux processus fait echouer `channel_post`
+  en `EPERM` (7 sur 342 en configuration par defaut). Limite declaree, non reparee.
+
+### Et un fait du HARNAIS, mesure au passage, qui n'est pas de notre ressort
+
+**Le fork tranche le JOURNAL BRUT, pas la vue compactee.** Un pere compacte transmet donc a son enfant
+**plus qu'il ne detient** : mesure, surface vive **16 898** contre heritage **541 857**, soit **32x**. Ce
+n'est pas un defaut de ce depot — c'est une observation a remonter, et elle donne a la garde du fork sa
+vraie raison d'etre : elle ne protege pas le pere de son plein, elle protege **l'enfant d'un heritage
+qu'il n'a pas demande**.
+
 ## Partie 4 — Ce qui est etabli, quoi qu'on decide
 
 ```
