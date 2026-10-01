@@ -170,3 +170,32 @@ precaution : c'est mesure.
 **Sauvegardes** (retour arriere en une copie) : `package.json.20261001-015721.bak` et
 `cordis.patch.yml.20261001-015721.bak`, dans le profil `web`.
 
+---
+
+## Partie 6 — Le canal de retour, verifie le 2026-10-01
+
+**Cinq falsifications successives**, chacune sur une revision GELEE, chacune avec sa sortie brute.
+Verdict final : **PASS**. Racine 184 cas, paquet 51, deux sondes vertes.
+
+### Ce que les falsifications ont detruit, et qui est corrige
+
+| # | defaut trouve | corrige par |
+|---|---|---|
+| 1 | l'ADRESSAGE n'etait applique qu'au STOCKAGE, pas a la LECTURE : un agent voyait les resumes de ceux qu'il devait contredire | la lecture ne rend que ce qui est adresse a l'appelant (`read_refused`) |
+| 2 | le REVEIL etait decide au DEPOT — donc jamais : `channel_post` EST un appel d'outil, l'emetteur est `running`, et les lignes `question`+`blocked` / `resultat`+`done` du §4 etaient du code mort | re-evaluation differee a l'ARRET (`turn/end` + `agent/disposed`, les deux mesures) |
+| 3 | la FRONTIERE DES ARGUMENTS etait une passoire : un `to` ou un `root` non declare ecrivait dans le magasin d'un AUTRE arbre et ouvrait un tour de son proprietaire | seules les cles declarees sont lues ; les autres sont ignorees et journalisees |
+| 4 | une PLACE RESERVEE fuyait : la rotation reemettait un id, `markPending` ecrasait la place du precedent, et la `question` d'un frere INNOCENT etait refusee — l'etat exact que la bourse reservee existe pour empecher | `load()` fusionne la generation, identite monotone par emetteur, collision refusee avant toute consommation |
+| 5 | DEUX SONDES NE MESURAIENT PLUS RIEN (celle du reveil executait ZERO mesure depuis l'ajout d'un troisieme outil) et personne ne l'avait vu | `TOOL_NAMES` source unique, consommee par le code, les tests ET les deux sondes ; un 4e outil fait rougir la SUITE |
+
+### Les limites mesurees, ecrites et non cachees
+
+- **Multi-process : « jamais perdu » est FAUX.** Une course reelle a deux processus fait echouer `channel_post` en `EPERM`/`ENOENT` — 27 echecs sur 342 depots en configuration hostile, **7 sur 342 en configuration par defaut**, sur les DEUX revisions. Cause : le `.tmp` porte un nom fixe partage, sans verrou. (`withFileLock` existe, non utilise.)
+- **`writeAll` sans `merged` rend un message DEUX FOIS** — jamais perdu, mais duplique. Atteignable seulement par le descripteur interne (`storeFor(root).writeAll(...)`), pas par la surface des outils ; 0 doublon en ~500 operations et en course reelle.
+- **Un reveil en attente n'est jamais repris par un processus neuf** : la marque monotone et l'index des attentes vivent en memoire. L'ancien processus mort, ce reveil n'est decide par personne.
+- **Aucun nombre n'est calibre sur une mesure de trafic reel** : les 300 s, les 2/4/3 des bourses, les 2000 caracteres et le N=50 sont des valeurs de depart. Les compteurs (`throttled`, `filtered`, `wake_sent`, `wake_refused`) rendent le reglage mesurable ; ils ne le mesurent pas.
+
+### Ce qui reste avant que le canal SERVE
+
+Le canal est monte, borne, filtre et verifie. **Aucun agent n'est encore charge de s'en servir** : sans une consigne dans les personas, c'est une infrastructure sans usager. Cout mesure : **~610 caracteres** (2 lignes au capitaine, 1 ligne par role), contre les **5 171** du protocole AgentTeams refuse a D4. Les descriptions d'outils portent deja le COMMENT ; la persona n'a besoin que du QUAND.
+
+
