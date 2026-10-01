@@ -94,6 +94,32 @@ harnais, pas du mode Boost. Il reste ou il est, et le HANDOVER le documente.
 ### 7. Que faire des cinq depots d'origine apres la coupure ?
 Ils portent encore le code que le profil charge. Les retirer proprement — ou les garder comme historique ?
 
+### 8. Le seuil de compaction automatique — **A ARBITRER** (ne le 1er octobre)
+
+Le test anti-derive a arrete **deux configurations contradictoires pour la meme ligne** — et les deux
+sont argumentees par des mesures :
+
+```
+packages/boost-mode/cordis.patch.yml:152-158   (PRUDENTE, retenue)
+  defaut 0,8 -> 678 464 estimes -> jusqu'a ~790 000 reels sur du code = 79 % de la fenetre
+  « Mesure : l'agent avait deja decroche a ce niveau (une session a repondu en CHINOIS a 792 000) »
+  0,5 -> ~500 000 estimes ~ 550 000 reels : « la cible voulue »
+
+cordis.patch.yml:138-166                        (DESSERREE, ecartee pour l'instant)
+  seuil = floor(min(W x ratio, W - O - headroomTokens)), O = 256 000 -> plafond 744 000
+  0,85 + headroomTokens 0 + maxTokens 32768 -> cible « ~85 % » de la fenetre, pour le COUT
+  n'evoque PAS le decrochage observe a 792 000, qui est SOUS sa cible
+```
+
+**Ce qui a ete fait** : la valeur prudente (0,5) est restauree dans le patch racine, l'invariant est
+retabli, et le desaccord reste ecrit en tete du bloc — il n'est pas tranche en silence.
+
+**Ce qui reste a decider** : viser ~55 % (plus de compactions, marge de coherence) ou ~85 % (moins de
+compactions, au-dessus du seul point de decrochage jamais observe). Une mesure trancherait : rejouer une
+session longue a 0,85 et regarder si le decrochage reapparait. Le cout d'une compaction est mesure
+(1 544 712 hors cache pour 5 declenchements).
+
+
 ---
 
 ## Partie 4 — Ce qui est etabli, quoi qu'on decide

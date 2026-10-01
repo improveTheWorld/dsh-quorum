@@ -133,6 +133,14 @@
               compaction: true
               toolResultPruner: true
             config:
+              # !!! CONFLIT NON TRANCHE — voir docs/DECISIONS.md, choix ouvert n°8.
+              # Le raisonnement ci-dessous vise ~85 % de la fenetre pour le COUT. Il
+              # n'evoque PAS l'observation consignee en face, dans
+              # packages/boost-mode/cordis.patch.yml:154 : « une session a repondu en
+              # chinois a 792 000 », soit 79 % — SOUS la cible proposee ici. Le test
+              # anti-derive a arrete la divergence (deux configurations pour la meme
+              # ligne) ; la valeur PRUDENTE est restauree en attendant l'arbitrage.
+              #
               # Seuil de compaction automatique — desserré pour le coût, mesuré.
               #
               # 1. Le seuil N'EST PAS W × thresholdRatio :
@@ -172,9 +180,7 @@
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
                 config:
-                  thresholdRatio: 0.85
-                  headroomTokens: 0
-                  maxTokens: 32768
+                  thresholdRatio: 0.5
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
               - id: tool-result-pruner

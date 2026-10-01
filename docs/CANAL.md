@@ -63,12 +63,17 @@ apres l'avoir payee (`tools/protocol.mjs`) :
 Donc **deux axes separes** :
 
 ```
-kind  (le fils DECLARE)  : decouverte · avancement · question · resultat
+kind  (le fils DECLARE)  : decouverte · avancement · question · resultat · echec
 etat  (le runtime DERIVE) : running · blocked · done · failed
 ```
 
 « Urgent » n'est pas un niveau : c'est l'etat `blocked` ou `failed`. Un enfant bloque **est** bloque —
-il a cesse de produire ; un enfant en echec a un `tool/result` en erreur. Cela ne se declare pas.
+il a cesse de produire.
+
+**Mesure du 1er octobre** : l'etat NE PEUT PAS porter l'echec a lui seul. Un enfant qui poste le fait
+DEPUIS un appel d'outil — donc en travaillant, donc `running` — voit son etat derive valoir `running` au
+depot. L'echec doit donc etre un **kind declare** : `echec`. C'est le seul kind qui porte l'urgence
+lui-meme, et il reveille quel que soit l'etat d'arret.
 
 ## 4. La politique de reveil — le seul enjeu
 
@@ -81,7 +86,7 @@ reveil est le seul evenement cher (un tour de mere, ~28x une session mediane).
 | avancement | running | **non** | un compteur |
 | question | **blocked** | **oui** | la question, courte |
 | resultat | done | oui, **une fois** | pointeur + taille |
-| echec | **failed** | **oui** | l'erreur brute |
+| echec | quel qu'il soit | **oui** | l'erreur brute |
 
 **C'est ce qui rend le battement de coeur abordable.** Sans niveaux, un battement = un reveil = un
 tour de mere a 28x : un desastre de cout. Avec les niveaux, un enfant peut dire « j'en suis a
