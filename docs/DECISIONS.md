@@ -60,15 +60,16 @@ propositions **retirees** (un registre qui cache ses revirements est un document
 
 ## Partie 3 — Choix OUVERTS
 
-### 1. La coupure du profil — **ta decision**
-Le script est ecrit et **eprouve sur un clone** de `web` (patch 104 -> 98 lignes, cinq liens -> un agregateur,
-zero avertissement apres). Il reste a dire **quand**. Ce qu'elle achete : le correctif `detached-jobs`
-(seul paquet dont le code a diverge), la garde jamais montee, `/schedule` rendu, les trois entrees mortes purgees.
+### 1. La coupure du profil — **FAIT** (2026-10-01 01:57)
+Appliquee, redemarree, verifiee (cf. Partie 5). Le journal du relais porte `via:"owner-can-collect"` :
+c'est le format que **seul** le correctif ecrit — donc le code neuf est vivant, ce n'est pas une absence d'erreur.
 
-### 2. Monter AgentTeams **a cote** de Boost ? — **ta decision**
-Coexistence prouvee (zero avertissement, outils disjoints). Ce que ca apporte : DAG, boite aux lettres,
-panneau d'activite. Ce que ca coute : **5 171 caracteres de protocole capitaine dans le prompt de CHAQUE
-agent non-membre** — tes verificateurs compris, dont l'independance est toute la valeur.
+### 2. Monter AgentTeams **a cote** de Boost ? — **DECIDE : NON**
+Coherent avec D4 : **un seul orchestrateur, et c'est le notre.** La coexistence est techniquement prouvee
+(zero avertissement, outils disjoints), mais elle coute **5 171 caracteres de protocole capitaine dans le
+prompt de CHAQUE agent non-membre** — tes verificateurs compris, dont l'independance est toute la valeur.
+Reouvrable en une commande si le DAG ou le panneau venaient a manquer : c'est justement pourquoi on ne le
+monte pas par defaut — une ligne s'ajoute en une commande, elle ne se retire pas aussi facilement.
 
 ### 3. Remonter le defaut de la garde anti-surrogate en amont ? — **ta decision**
 Valeur maximale, cout de maintenance nul. Demande un rapport de defaut avec nos mesures (3 journaux sur
@@ -83,8 +84,9 @@ Etude faite : le paquet tel quel arriverait dans un marche sature (6 469 paquets
 direct plus mur). Les actifs reellement uniques : le frein hors cache, le job possede par la racine, le
 relais adaptatif, et **les mesures** — que personne ne publie.
 
-### 6. `dsh-auto-update` rejoint-il le depot consolide ?
-Cinquieme plugin, **hors `CodeSource`** et hors git (`profiles/local-plugins/`). Inclus ou laisse dehors ?
+### 6. `dsh-auto-update` dans le depot consolide ? — **DECIDE : NON**
+Cinquieme plugin, **hors `CodeSource`** et hors git (`profiles/local-plugins/`) : c'est de l'infra de
+harnais, pas du mode Boost. Il reste ou il est, et le HANDOVER le documente.
 
 ### 7. Que faire des cinq depots d'origine apres la coupure ?
 Ils portent encore le code que le profil charge. Les retirer proprement — ou les garder comme historique ?
