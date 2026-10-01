@@ -267,6 +267,26 @@ async function main() {
   if (afterRefusal !== 1) failures.push('apres un refus, compactNow a ete appele ' + afterRefusal + ' fois au lieu d une')
   if (compactionCalls.length !== 1) failures.push('un tour sans refus a declenche une compaction (total ' + compactionCalls.length + ')')
 
+  // ---- 6. LE RETOUR REEL DE L OUTIL D OCCUPATION, PAR LE REGISTRE ----------
+  //
+  // Le defaut reel, mesure : l'outil rendait une cle ('sources') absente du
+  // schema de sortie, et le registre REJETTE toute cle non declaree
+  // ('dsh-tools/lib/index.js:3541-3544'). La sonde exerce donc AUSSI le RETOUR de
+  // l'outil, par la meme couture que le fork — un test qui appelle 'execute()'
+  // directement passe au-dessus de cette validation et ne prouve rien.
+  meterAvailable = true
+  windowTokens = WINDOW
+  meterNodes = [{ seq: 1, tokens: 71_000 }]
+  const occupancy = await call('context_occupancy', workerAgent)
+  say('6-outil', 'registry.execute(context_occupancy) -> isError=' + occupancy.isError
+    + ' · inheritedTokens=' + (occupancy.value?.inheritedTokens ?? '(aucune valeur)')
+    + ' · windowTokens=' + (occupancy.value?.windowTokens ?? '(aucune valeur)')
+    + ' · ratio=' + (occupancy.value?.ratio ?? '(aucune valeur)')
+    + ' · verdict=' + (occupancy.value?.verdict ?? '(aucune valeur)')
+    + ' · sources=' + JSON.stringify(occupancy.value?.sources ?? null))
+  if (occupancy.isError === true) failures.push('le retour REEL de context_occupancy est rejete par le registre : ' + String(occupancy.error?.message))
+  if (occupancy.value?.sources?.inherited !== 'token-meter') failures.push('le retour REEL de context_occupancy ne porte pas ses sources : ' + JSON.stringify(occupancy.value ?? null))
+
   // ---- Le journal du plugin : la meme histoire, cote production -------------
   const journalFile = join(scratch, 'plugin-data', plugin.name, 'decisions.jsonl')
   const rows = existsSync(journalFile)

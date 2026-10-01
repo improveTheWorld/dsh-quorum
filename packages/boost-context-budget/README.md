@@ -83,8 +83,12 @@ source unique que lisent le code, les tests et toute sonde : un outil ajoute fai
 node --test packages/boost-context-budget/test/context-budget.test.mjs
 ```
 
-24 cas, T-C1 a T-C7 : la mesure et sa frontiere, le refus et son message, le seuil configurable, la
-compaction differee et son idempotence par tour, le seuil invalide, et l'outil lui-meme.
+25 cas, T-C1 a T-C8 : la mesure et sa frontiere, le refus et son message, le seuil configurable, la
+compaction differee et son idempotence par tour, le seuil invalide, l'outil lui-meme, et — **T-C8** — la
+**valeur REELLE validee par le REGISTRE** `dsh-tools`. Ce dernier cas existe pour un defaut reel : l'outil
+rendait `sources`, absent du schema de sortie, et le registre rejette toute cle non declaree. Les cas qui
+appellent `tool.execute(...)` directement passent **au-dessus** de cette couture — ils etaient verts quand
+l'outil ne marchait pas.
 
 ## Sonde
 
@@ -103,8 +107,10 @@ Elle monte la VRAIE application cordis, le VRAI registre `dsh-tools` et les VRAI
 3. le **passage** sous le seuil, corps execute et chaine non coupee (un listener en aval le voit) ;
 4. le **faux negatif** : sans mesure, le fork n'est pas refuse et le journal dit `fork-unguarded` ;
 5. la **compaction differee** : un refus arme, `turn/end` declenche `compactNow` une fois, un tour
-   sans refus jamais.
+   sans refus jamais ;
+6. le **retour REEL de `context_occupancy`** par le registre : la valeur rendue (avec ses `sources`) et
+   le fait qu'elle soit acceptee.
 
-Sortie 0 seulement si les cinq concordent. Falsification : en montant la garde sous la portee
+Sortie 0 seulement si les six concordent. Falsification : en montant la garde sous la portee
 TAGUEE de l'enfant au lieu de la ligne hote, la sonde sort en `PROBE-FAIL` et nomme la perte
 (`le refus n atteint pas le registre`, journal vide, zero compaction).

@@ -3,7 +3,7 @@
 //   node --test packages/boost-context-budget/test/context-budget.test.mjs
 //
 // Chaque cas ci-dessous peut ECHOUER, et c'est la seule raison de l'ecrire. Les
-// cas T-C1..T-C7 sont ceux qui ont decide la conception :
+// cas T-C1..T-C8 sont ceux qui ont decide la conception :
 //
 //   T-C1  la mesure : le ratio est calcule, et le TOUR EN VOL est exclu du
 //         prefixe herite — c'est la frontiere meme que le fork applique ;
@@ -17,12 +17,16 @@
 //   T-C6  un seuil invalide journalise et retombe sur le defaut, sans casser le
 //         montage ;
 //   T-C7  l'outil rend la mesure de l'APPELANT, et un appelant sans session ne
-//         fait pas tomber ce qui l'entoure.
+//         fait pas tomber ce qui l'entoure ;
+//   T-C8  la valeur REELLE passe la validation du REGISTRE — le seul cas qui
+//         aurait attrape le defaut reel : appeler 'tool.execute(...)' passe
+//         AU-DESSUS de la couture qui valide le schema de sortie.
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { pathToFileURL } from 'node:url'
 import {
   apply,
   buildTools,
@@ -39,6 +43,19 @@ import {
 /** Un journal par test : le fichier est la seule preuve lisible apres coup. */
 function home() {
   return mkdtempSync(join(tmpdir(), 'boost-context-budget-'))
+}
+
+/** Une attente courte : cordis active ses fibres hors du tour courant. */
+const tick = (ms) => new Promise((done) => setTimeout(done, ms))
+
+/**
+ * Les modules du harnais, resolus comme 'test/aggregate.test.mjs' resout 'yaml'.
+ * Introuvables, c'est une ERREUR et jamais un saut : un controle qui ne peut pas
+ * s'executer ne doit pas ressembler a un controle qui passe.
+ */
+function harnessModules() {
+  return process.env.DSH_HARNESS
+    ?? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules')
 }
 
 /** Les entrees reellement ecrites dans 'decisions.jsonl'. */
@@ -634,4 +651,86 @@ test('T-C7d : le rendu texte porte le ratio et le seuil, et l inconnu se dit', (
   const blind = harness({})
   const unknown = buildTools(blind.controller)[0].output.render({}, blind.controller.measureFor(fakeSession('session-c7d-2', EVENTS)))
   assert.ok(unknown[0].text.includes('occupation inconnue'), unknown[0].text)
+})
+
+// --------------------------------------------------------------------------- //
+// T-C8 — le retour REEL, par le REGISTRE                                       //
+// --------------------------------------------------------------------------- //
+
+/**
+ * LE cas qui aurait attrape le defaut reel : l'outil rendait 'sources', absent du
+ * schema de sortie, et 'dsh-tools' REJETTE toute cle non declaree
+ * ('dsh-tools/lib/index.js:3541-3544' :
+ * `tool "..." returned invalid output: "value.sources" is not a declared property`).
+ *
+ * Les cas precedents appellent 'tool.execute(...)' DIRECTEMENT — donc AU-DESSUS
+ * de la couture qui valide, et c'est pour cela qu'ils etaient verts quand l'outil
+ * ne marchait pas. Celui-ci monte le VRAI 'ToolRuntime', monte la ligne du plugin
+ * comme le profil la monte, laisse 'agent/created' installer l'outil dans la
+ * surface de l'agent, puis passe par 'registry.execute(...)'. Si le schema cesse
+ * de correspondre a la valeur rendue, ce cas rougit — et lui seul.
+ */
+test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que execute() contourne)', async () => {
+  const modules = harnessModules()
+  const entries = {
+    cordis: join(modules, '@deepseek-ai', 'cordis', 'lib', 'index.js'),
+    scope: join(modules, '@deepseek-ai', 'dsh-scope', 'lib', 'index.js'),
+    tools: join(modules, '@deepseek-ai', 'dsh-tools', 'lib', 'index.js'),
+  }
+  for (const [label, file] of Object.entries(entries)) {
+    assert.ok(existsSync(file), 'le harnais doit etre installe pour ce cas (' + label + ') : ' + file)
+  }
+  const { Context } = await import(pathToFileURL(entries.cordis).href)
+  const { createScope } = await import(pathToFileURL(entries.scope).href)
+  const ToolRuntime = (await import(pathToFileURL(entries.tools).href)).default
+
+  const root = new Context()
+  const session = fakeSession('session-c8', EVENTS)
+  const agent = { id: 'session-c8', session, status: 'idle' }
+  await root.plugin({
+    name: 't-c8-services',
+    apply: (ctx) => {
+      // 'ToolRuntime' declare 'inject: ["systemPrompt"]' : sans ce service la
+      // ligne ne s'active pas et le registre reste introuvable.
+      ctx.provide('systemPrompt', { tools: () => {}, section: () => {}, getSectionOrder: () => 0 })
+      ctx.provide('agents', { get: (id) => (id === 'session-c8' ? agent : undefined), list: () => [] })
+      ctx.provide('tokenMeter', meterOf([{ seq: 1, tokens: 71_000 }]))
+      ctx.provide('sessionProjections', projectionsOf({ window: 100_000 }))
+    },
+  })
+  await root.plugin(ToolRuntime, { mode: 'native' })
+  let registry
+  await root.plugin({ name: 't-c8-view', inject: ['tools'], apply: (ctx) => { registry = ctx.tools } })
+  assert.ok(registry !== undefined, 'le registre d outils n a pas ete capture')
+
+  // La LIGNE HOTE, montee comme le profil la monte, puis l'annonce de l'agent :
+  // c'est 'agent/created' qui installe l'outil dans SA surface. Le journal part
+  // dans un dossier jetable, jamais dans le '$DSH_HOME' de la machine.
+  const dir = home()
+  const scope = createScope(root, agent)
+  agent.ctx = scope.ctx
+  await root.plugin({ name: 'dsh-boost-context-budget', inject: ['agents'], apply }, { home: dir })
+  await tick(30)
+  root.emit('agent/created', { agent, source: 'startup' })
+  await tick(150)
+
+  const surface = registry.schemas(agent).map((schema) => schema.name)
+  assert.ok(surface.includes('context_occupancy'), 'l outil n est pas sur la surface de l agent : ' + surface.join(', '))
+
+  const result = await registry.execute({
+    callId: 't-c8-call',
+    name: 'context_occupancy',
+    arguments: {},
+    agent,
+    signal: new AbortController().signal,
+  })
+
+  assert.equal(result.isError, false, 'le registre a REJETE la valeur rendue : ' + String(result.error?.message))
+  assert.equal(result.value.inheritedTokens, 71_000)
+  assert.equal(result.value.windowTokens, 100_000)
+  assert.equal(result.value.ratio, 0.71)
+  assert.equal(result.value.verdict, VERDICT_REFUSED)
+  assert.equal(result.value.sources.inherited, 'token-meter', 'sources doit survivre a la validation du registre')
+  assert.equal(result.value.sources.boundarySeq, 3)
+  try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
 })

@@ -266,7 +266,9 @@ export function inheritedOf(services, session, boundary) {
  * @param session - la session mesuree (celle de l'appelant).
  * @param threshold - le seuil effectif de la ligne.
  * @returns '{ inheritedTokens, windowTokens, ratio, forkThresholdRatio, verdict, sources }',
- *   avec 'null' partout ou la mesure n'est pas etablie.
+ *   avec 'null' partout ou la mesure n'est pas etablie. 'sources' est DECLARE au
+ *   schema de sortie : le registre valide la valeur rendue et rejette toute cle
+ *   non declaree ('dsh-tools/lib/index.js:3541-3544').
  */
 export function measure(services, session, threshold) {
   const events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : undefined
@@ -337,7 +339,8 @@ export function buildTools(controller) {
       name: 'context_occupancy',
       description: 'Rend l occupation du contexte de TON agent : inheritedTokens (ce qu un fork heriterait '
         + '— le prefixe clos jusqu au dernier turn/end), windowTokens (la fenetre du modele de ta route), '
-        + 'ratio, forkThresholdRatio (le seuil de la ligne) et verdict (ok | refused | unknown). Appelle-le '
+        + 'ratio, forkThresholdRatio (le seuil de la ligne), verdict (ok | refused | unknown) et sources '
+        + '(quelle source a servi). Appelle-le '
         + 'QUAND TU VEUX, et notamment AVANT de decider de forker : au-dela du seuil, subagent_fork est '
         + 'refuse. L outil ne prend aucun argument : la mesure est la tienne, jamais celle d un autre.',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -360,8 +363,23 @@ export function buildTools(controller) {
             },
             forkThresholdRatio: { type: 'number', description: 'Seuil effectif de la ligne : au-dela, subagent_fork est refuse.' },
             verdict: { type: 'string', enum: [VERDICT_OK, VERDICT_REFUSED, VERDICT_UNKNOWN], description: 'ok (un fork passe) | refused (il serait refuse) | unknown (mesure incomplete).' },
+            // 'sources' est DECLARE, pas retire : il dit QUELLE source a servi, et
+            // c'est la part honnete de la mesure. Un nombre sans sa source ne se
+            // verifie pas ; et le schema le valide desormais au retour, comme le
+            // registre le fait ('dsh-tools/lib/index.js:3541-3544').
+            sources: {
+              type: 'object',
+              additionalProperties: false,
+              description: 'D ou viennent les deux nombres : inherited (token-meter | context-breakdown | no-completed-turn | unavailable), window (context-pressure | request-context | unavailable), et la frontiere du prefixe herite.',
+              properties: {
+                inherited: { type: 'string', description: 'Source de inheritedTokens.' },
+                window: { type: 'string', description: 'Source de windowTokens.' },
+                boundarySeq: { type: 'integer', description: 'Seq du dernier turn/end — la frontiere du prefixe herite ; -1 avant tout tour clos.' },
+              },
+              required: ['inherited', 'window', 'boundarySeq'],
+            },
           },
-          required: ['inheritedTokens', 'windowTokens', 'ratio', 'forkThresholdRatio', 'verdict'],
+          required: ['inheritedTokens', 'windowTokens', 'ratio', 'forkThresholdRatio', 'verdict', 'sources'],
         },
         render: (_args, value) => [{ type: 'text', text: occupancyText(value) }],
       },
