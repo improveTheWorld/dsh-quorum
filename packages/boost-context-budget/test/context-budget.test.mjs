@@ -80,11 +80,13 @@ function fakeSession(id, events) {
  * (le tour en vol du fork, seq 4-5). Le prefixe herite s'arrete a seq 3.
  */
 const EVENTS = [
-  { type: 'turn/start', seq: 0 },
+  { type: 'turn/start', seq: 0, data: { turn: 1 } },
   { type: 'user/message', seq: 1 },
   { type: 'assistant/message', seq: 2 },
   { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } },
-  { type: 'turn/start', seq: 4 },
+  // Le tour EN VOL du fork : c'est le tour 2, et c'est lui que l'armement d'un
+  // refus doit porter (voir T-C4e).
+  { type: 'turn/start', seq: 4, data: { turn: 2 } },
   { type: 'assistant/message', seq: 5 },
 ]
 
@@ -428,7 +430,8 @@ test('T-C4b : un agent deja idle n attend pas, et un agent disparu est journalis
   const agent = fakeAgent(session, { status: 'idle' })
   harnessed.addAgent(agent)
   await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
-  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 1 } })
+  // Le refus appartient au tour OUVERT du journal : le tour 2 (EVENTS).
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1)
   assert.equal(agent.whenIdleCalls, 0, 'un agent deja inactif n est pas attendu')
@@ -439,7 +442,7 @@ test('T-C4b : un agent deja idle n attend pas, et un agent disparu est journalis
   })
   const ghost = fakeSession('session-c4b-ghost', EVENTS)
   await gone.preExecute({ name: FORK_TOOL, agent: fakeAgent(ghost, { status: 'idle' }), arguments: {} })
-  assert.doesNotThrow(() => gone.fire('session/event', ghost, { type: 'turn/end', data: { turn: 1 } }))
+  assert.doesNotThrow(() => gone.fire('session/event', ghost, { type: 'turn/end', data: { turn: 2 } }))
   await gone.controller.settled()
   assert.equal(gone.compactionCalls.length, 0)
   assert.equal(entriesOf(gone.dir, 'compact-skipped').length, 1)
@@ -457,7 +460,7 @@ test('T-C4c : une compaction qui echoue est comptee et journalisee, jamais propa
   const agent = fakeAgent(session, { status: 'idle' })
   harnessed.addAgent(agent)
   await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
-  assert.doesNotThrow(() => harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 1 } }))
+  assert.doesNotThrow(() => harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } }))
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1, 'la compaction a bien ete tentee')
   assert.equal(harnessed.controller.stats.compacted, 0)
@@ -480,7 +483,7 @@ test('T-C4d : un service de compaction illisible est journalise, jamais un rejet
   const agent = fakeAgent(session, { status: 'idle' })
   harnessed.addAgent(agent)
   await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
-  assert.doesNotThrow(() => harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 1 } }))
+  assert.doesNotThrow(() => harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } }))
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 0)
   assert.equal(harnessed.controller.stats.compact_failed, 1)
@@ -499,7 +502,7 @@ test('T-C5 : deux tours refuses donnent deux compactions, jamais deux pour un me
   assert.equal((await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })).decision.kind, 'deny')
   assert.equal((await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })).decision.kind, 'deny')
   assert.equal(harnessed.controller.stats.refused, 2, 'les deux refus sont comptes')
-  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 1 } })
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1, 'un tour, une compaction — quel que soit le nombre de refus')
 
@@ -523,7 +526,7 @@ test('T-C5b : le tour d un AUTRE agent ne solde pas le refus de celui-ci', async
   harnessed.fire('session/event', other, { type: 'turn/end', data: { turn: 1 } })
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 0, 'le refus appartient a SA session')
-  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 1 } })
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1)
 })
@@ -533,7 +536,11 @@ test('T-C5b : le tour d un AUTRE agent ne solde pas le refus de celui-ci', async
 // --------------------------------------------------------------------------- //
 
 test('T-C6 : un seuil invalide est journalise, remplace par le defaut, et le montage tient', async () => {
-  for (const invalid of [1.5, -0.2, 'abc', '', Number.NaN, Number.POSITIVE_INFINITY, null, true, {}]) {
+  // '-0' et '-0' cite : le harnais exige une valeur JSON SANS PERTE et
+  // 'isJsonNumber' exclut -0 ('dsh-tools/lib/index.js:126-128'). Accepte, ce
+  // seuil faisait rejeter TOUTE reponse de l'outil
+  // ('value is not lossless JSON') — 24 cas verts et l'outil mort.
+  for (const invalid of [1.5, -0.2, -0, '-0', 'abc', '', Number.NaN, Number.POSITIVE_INFINITY, null, true, {}]) {
     const dir = home()
     let controller
     assert.doesNotThrow(() => {
@@ -543,7 +550,12 @@ test('T-C6 : un seuil invalide est journalise, remplace par le defaut, et le mon
     const rows = entriesOf(dir, 'threshold-invalid')
     assert.equal(rows.length, 1, 'la valeur invalide est JOURNALISEE pour ' + JSON.stringify(invalid))
     assert.equal(rows[0].fallback, 0.6)
-    assert.equal(rows[0].value, typeof invalid === 'string' ? invalid : String(invalid))
+    assert.equal(rows[0].value, Object.is(invalid, -0) ? '-0' : String(invalid))
+    // Le seuil rendu doit survivre a un aller-retour JSON : c'est la propriete
+    // que le registre verifie, et -0 la viole.
+    const value = controller.measureFor(fakeSession('session-c6-' + String(invalid), EVENTS))
+    assert.equal(Object.is(value.forkThresholdRatio, -0), false, '-0 ne doit JAMAIS sortir : ' + JSON.stringify(invalid))
+    assert.deepEqual(JSON.parse(JSON.stringify(value)), value, 'la valeur rendue doit etre du JSON sans perte')
   }
 })
 
@@ -733,4 +745,122 @@ test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que exe
   assert.equal(result.value.sources.inherited, 'token-meter', 'sources doit survivre a la validation du registre')
   assert.equal(result.value.sources.boundarySeq, 3)
   try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
+})
+
+// --------------------------------------------------------------------------- //
+// T-C9 — les defauts STRUCTURELS trouves par falsification                      //
+// --------------------------------------------------------------------------- //
+
+/**
+ * LE cas qui compte : une compaction 'replace' posee DANS le tour en cours.
+ *
+ * Le fork tranche des POSITIONS DE JOURNAL ('events.slice(0, lastEnd.seq + 1)',
+ * 'dsh-subagent-fork-in-process/lib/index.js:23-28') ; la compaction, elle, retire
+ * des NOEUDS DE SURFACE ('dsh-compaction-basic/lib/index.js:650-661'). Une somme de
+ * surface RETENUE tombait donc a ZERO sur un prefixe de 750 008 tokens, et la garde
+ * se ROUVRAIT sur le fork qu'elle venait de refuser — fabrique par notre propre
+ * compaction differee. Avant correctif, ce cas rend 0 et laisse passer le fork.
+ */
+const COMPACTED_EVENTS = [
+  { type: 'turn/start', seq: 0, data: { turn: 1 } },
+  { type: 'user/message', seq: 1 },
+  { type: 'assistant/message', seq: 2, data: { usage: { inputTokens: 8, cacheReadTokens: 750_000, cacheWriteTokens: 0 } } },
+  { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } },
+  { type: 'turn/start', seq: 4, data: { turn: 2 } },
+  // LA COMPACTION : elle REMPLACE la region 1-3, donc APRES la frontiere.
+  { type: 'user/message', seq: 5, data: { message: 'resume' }, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 3 } },
+]
+
+test('T-C9a : une compaction POSTERIEURE a la frontiere ne remet pas le prefixe a zero', async () => {
+  const session = fakeSession('session-c9a', COMPACTED_EVENTS)
+  const harnessed = harness({
+    services: {
+      // La surface RETENUE apres compaction : le seul noeud survivant est le
+      // resume, pose a seq 5 — donc AU-DESSUS de la frontiere (seq 3).
+      tokenMeter: meterOf([{ seq: 5, tokens: 1_200 }]),
+      sessionProjections: projectionsOf({ window: 1_000_000 }),
+    },
+  })
+  const value = harnessed.controller.measureFor(session)
+  assert.equal(value.sources.boundarySeq, 3)
+  assert.equal(value.inheritedTokens, 750_008, 'le prefixe du fork est INCHANGE par la compaction')
+  assert.notEqual(value.inheritedTokens, 0, 'une somme de surface ne doit plus pouvoir remettre le prefixe a zero')
+  assert.equal(value.sources.inherited, 'prefix-usage')
+  assert.ok(Math.abs(value.ratio - 0.750008) < 0.01, 'ratio ' + value.ratio)
+  assert.equal(value.verdict, VERDICT_REFUSED)
+
+  // Et la garde ne se rouvre pas : c'est le defaut, en une ligne.
+  const decision = await harnessed.preExecute({ name: FORK_TOOL, agent: fakeAgent(session, { status: 'idle' }), arguments: {} })
+  assert.equal(decision.decision.kind, 'deny', 'la garde ne doit PAS se rouvrir apres une compaction')
+})
+
+test('T-C9b : sans compaction, c est la vue la PLUS GRANDE des deux qui gagne', () => {
+  // Les noeuds clos valent 100 000 ; l'usage du fournisseur n'en vaut que 40 000 :
+  // la somme de surface est la vue la plus fine, et c'est elle qui reste.
+  const events = EVENTS.map((event) => event.seq === 2
+    ? { ...event, data: { usage: { inputTokens: 40_000, cacheReadTokens: 0, cacheWriteTokens: 0 } } }
+    : event)
+  const harnessed = harness({
+    services: { tokenMeter: meterOf([{ seq: 1, tokens: 60_000 }, { seq: 2, tokens: 40_000 }]), sessionProjections: projectionsOf({ window: 160_000 }) },
+  })
+  const value = harnessed.controller.measureFor(fakeSession('session-c9b-2', events))
+  assert.equal(value.inheritedTokens, 100_000)
+  assert.equal(value.sources.inherited, 'token-meter')
+  // La session SANS usage reste servie par la meme source : rien n a change.
+  assert.equal(harnessed.controller.measureFor(fakeSession('session-c9b', EVENTS)).inheritedTokens, 100_000)
+})
+
+test('T-C9c : une fenetre IMPLAUSIBLE rend la mesure inconnue, et la garde s abstient', async () => {
+  const harnessed = harness({
+    services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 1 }) },
+  })
+  const session = fakeSession('session-c9c', EVENTS)
+  const value = harnessed.controller.measureFor(session)
+  assert.equal(value.windowTokens, null, 'une fenetre de 1 token n est pas une mesure')
+  assert.equal(value.ratio, null)
+  assert.equal(value.sources.window, 'implausible-window')
+  assert.equal(value.verdict, VERDICT_UNKNOWN)
+  const decision = await harnessed.preExecute({ name: FORK_TOOL, agent: fakeAgent(session, { status: 'idle' }), arguments: {} })
+  assert.equal(decision.decision.kind, 'allow', 'un controle qui devine est pire qu un controle qui s abstient')
+  assert.equal(entriesOf(harnessed.dir, 'fork-unguarded').length, 1)
+})
+
+test('T-C9d : le nom garde est CONFIGURABLE, parce que le nom est une valeur du preset', async () => {
+  const services = { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) }
+  const session = fakeSession('session-c9d', EVENTS)
+  const agent = fakeAgent(session, { status: 'idle' })
+  // Sous son nom par defaut : garde.
+  const byDefault = harness({ services })
+  assert.deepEqual(byDefault.controller.forkTools, ['subagent_fork'])
+  assert.equal((await byDefault.preExecute({ name: 'subagent_fork', agent, arguments: {} })).decision.kind, 'deny')
+  // Le meme provider monte sous un AUTRE nom : la ligne doit pouvoir le declarer.
+  const renamed = harness({ config: { forkToolNames: ['subagent_fork_deep'] }, services })
+  assert.deepEqual(renamed.controller.forkTools, ['subagent_fork_deep'])
+  assert.equal((await renamed.preExecute({ name: 'subagent_fork_deep', agent, arguments: {} })).decision.kind, 'deny')
+  assert.equal((await renamed.preExecute({ name: 'subagent_fork', agent, arguments: {} })).decision.kind, 'allow',
+    'la liste est CLOSE : ce qui n y est pas passe — la limite est ecrite dans le README')
+  // Une liste invalide journalise et retombe sur le defaut.
+  const broken = harness({ config: { forkToolNames: ['', 42] }, services })
+  assert.deepEqual(broken.controller.forkTools, ['subagent_fork'])
+  assert.equal(entriesOf(broken.dir, 'fork-tools-invalid').length, 1)
+})
+
+test('T-C9e : un refus dans un tour qui ne se ferme JAMAIS ne compacte pas un tour etranger', async () => {
+  const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
+  const session = fakeSession('session-c9e', EVENTS)
+  const agent = fakeAgent(session, { status: 'idle' })
+  harnessed.addAgent(agent)
+  const refused = await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
+  assert.equal(refused.decision.kind, 'deny')
+  // L'armement porte le tour du refus (le tour 2, celui qu'EVENTS laisse ouvert).
+  assert.equal(harnessed.controller.refusedThisTurn.get('session-c9e'), 2)
+  // Le tour 2 ne se ferme JAMAIS : c'est le tour 3 qui se ferme.
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 3 } })
+  await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 0, 'un tour etranger ne solde pas le refus')
+  assert.equal(harnessed.controller.refusedThisTurn.has('session-c9e'), false, 'l armement est consomme')
+  const rows = entriesOf(harnessed.dir, 'fork-arm-orphaned')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].armedTurn, 2)
+  assert.equal(rows[0].closingTurn, 3)
 })

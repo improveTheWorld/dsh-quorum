@@ -54,11 +54,13 @@ const failures = []
 
 /** Le journal d'une session : le tour clos a seq 3, le tour en vol a seq 4-5. */
 const EVENTS = [
-  { type: 'turn/start', seq: 0 },
+  { type: 'turn/start', seq: 0, data: { turn: 1 } },
   { type: 'user/message', seq: 1 },
   { type: 'assistant/message', seq: 2 },
   { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } },
-  { type: 'turn/start', seq: 4 },
+  // Le tour EN VOL : l'armement d'un refus porte SON numero (tour 2), sinon la
+  // compaction differee tirerait sur le premier turn/end venu.
+  { type: 'turn/start', seq: 4, data: { turn: 2 } },
   { type: 'assistant/message', seq: 5 },
 ]
 const WINDOW = 100_000

@@ -69,8 +69,35 @@ export const inject = ['agents']
  */
 export const TOOL_NAMES = ['context_occupancy']
 
-/** L'outil que ce paquet garde. Nommee par l'appelant dans sa propre surface. */
+/**
+ * L'outil que ce paquet garde — par son NOM, et c'est une LIMITE, ecrite ici
+ * parce qu'un garde qui ne garde qu'un nom doit le dire.
+ *
+ * 'subagent_fork' est une valeur du PRESET ('dsh-base/cordis.patch.yml:383-388',
+ * `toolName: subagent_fork`), pas une propriete du harnais : mesure faite, le
+ * meme provider monte sous un autre nom ('subagent_fork_deep') passe SANS refus
+ * ni trace. Reconnaitre le fork par son FOURNISSEUR est hors de portee de ce
+ * seam : 'tools/pre-execute' ne remet que `{ callId, name, arguments, agent,
+ * parent, signal }` ('dsh-tools/lib/types/index.d.ts:216-242', dispatch
+ * 'dsh-tools/lib/index.js:3224') — aucun champ de provider. La riposte
+ * disponible ici est la CONFIGURATION : 'forkToolNames'.
+ */
 export const FORK_TOOL = 'subagent_fork'
+
+/** Les noms gardes par defaut : celui du preset. */
+export const DEFAULT_FORK_TOOLS = [FORK_TOOL]
+
+/**
+ * Plancher de plausibilite d'une fenetre de contexte, en tokens.
+ *
+ * Une route annonce une fenetre de l'ordre du millier au million ; sous ce
+ * plancher ce n'est plus une mesure mais un accident de lecture, et un ratio
+ * calcule dessus vaut « 7 100 000 % de la fenetre » (mesure : 'windowTokens: 1'
+ * rendait 'ratio: 71000, verdict: refused'). Un controle qui devine est pire
+ * qu'un controle qui s'abstient : sous le plancher la mesure vaut 'unknown', la
+ * garde s'abstient, et la source est nommee 'implausible-window'.
+ */
+export const MIN_PLAUSIBLE_WINDOW_TOKENS = 4096
 
 /**
  * Seuil par defaut : 0,6. Justification, et ce n'est pas un gout.
@@ -152,20 +179,56 @@ export function writeJournal(home, entry) {
  * Une chaine numerique est acceptee (une config YAML citee l'est souvent) ;
  * `null`, une chaine vide, un booleen, NaN et l'infini sont refuses.
  *
+ * `-0` est refuse AUSSI, et ce n'est pas une coquetterie : le harnais exige une
+ * valeur JSON SANS PERTE ('isJsonNumber', 'dsh-tools/lib/index.js:126-128'
+ * exclut -0), et un seuil de -0 faisait rejeter la reponse ENTIERE de l'outil
+ * (`returned invalid output: value is not lossless JSON`). '-0' cite en YAML
+ * arrive au meme endroit : la chaine est numerique, donc convertie en -0.
+ *
  * @param value - la valeur brute de la cle 'forkThresholdRatio'.
  * @param journal - sink de journalisation, injecte pour les tests.
- * @returns le seuil effectif, toujours dans [0,1].
+ * @returns le seuil effectif, toujours dans [0,1] et jamais -0.
  */
 export function resolveThreshold(value, journal = () => {}) {
   if (value === undefined) return DEFAULT_FORK_THRESHOLD_RATIO
   const numeric = typeof value === 'number'
     ? value
     : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN
-  if (!Number.isFinite(numeric) || numeric < 0 || numeric > 1) {
-    journal({ step: 'threshold-invalid', value: String(value), fallback: DEFAULT_FORK_THRESHOLD_RATIO })
+  if (!Number.isFinite(numeric) || Object.is(numeric, -0) || numeric < 0 || numeric > 1) {
+    journal({ step: 'threshold-invalid', value: Object.is(value, -0) ? '-0' : String(value), fallback: DEFAULT_FORK_THRESHOLD_RATIO })
     return DEFAULT_FORK_THRESHOLD_RATIO
   }
   return numeric
+}
+
+/**
+ * Les NOMS d'outils gardes, depuis la configuration de la ligne.
+ *
+ * Le nom du fork est une valeur du preset (voir 'FORK_TOOL') : un deploiement qui
+ * monte le provider sous un autre nom doit pouvoir le declarer ici. Une valeur
+ * invalide (non-tableau, que des entrees vides) est JOURNALISEE et remplacee par
+ * le defaut — le montage tient, comme pour le seuil.
+ *
+ * @param value - la valeur brute de la cle 'forkToolNames'.
+ * @param journal - sink de journalisation, injecte pour les tests.
+ * @returns au moins un nom, jamais une liste vide.
+ */
+export function resolveForkTools(value, journal = () => {}) {
+  if (value === undefined) return [...DEFAULT_FORK_TOOLS]
+  const cleaned = []
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry !== 'string') continue
+      const trimmed = entry.trim()
+      if (trimmed === '' || cleaned.includes(trimmed)) continue
+      cleaned.push(trimmed)
+    }
+  }
+  if (cleaned.length === 0) {
+    journal({ step: 'fork-tools-invalid', value: Array.isArray(value) ? JSON.stringify(value) : String(value), fallback: [...DEFAULT_FORK_TOOLS] })
+    return [...DEFAULT_FORK_TOOLS]
+  }
+  return cleaned
 }
 
 /**
@@ -208,12 +271,28 @@ function positiveInt(value) {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null
 }
 
-/** La fenetre du modele de la route : projection d'abord, evenement durable ensuite. */
+/** Une fenetre PLAUSIBLE, ou rien — voir 'MIN_PLAUSIBLE_WINDOW_TOKENS'. */
+function plausibleWindow(value) {
+  const window = positiveInt(value)
+  return window !== null && window >= MIN_PLAUSIBLE_WINDOW_TOKENS ? window : null
+}
+
+/**
+ * La fenetre du modele de la route : projection d'abord, evenement durable ensuite.
+ *
+ * Une valeur annoncee mais IMPLAUSIBLE (entier positif sous le plancher) n'est pas
+ * une fenetre : elle rend 'windowTokens: null' et la source 'implausible-window',
+ * donc une mesure 'unknown' et une garde qui s'abstient. Une valeur plausible
+ * trouvee dans l'autre source l'emporte : la lecture est tolerante, le verdict
+ * ne l'est pas.
+ */
 export function windowOf(services, session, events) {
+  let implausible = false
   try {
-    const values = services.sessionProjections?.snapshot?.(session, ['contextPressure'])?.values
-    const window = positiveInt(values?.contextPressure?.contextWindow)
+    const raw = services.sessionProjections?.snapshot?.(session, ['contextPressure'])?.values?.contextPressure?.contextWindow
+    const window = plausibleWindow(raw)
     if (window !== null) return { windowTokens: window, source: 'context-pressure' }
+    if (positiveInt(raw) !== null) implausible = true
   } catch {
     // Une projection qui jette ne doit pas empecher la lecture durable.
   }
@@ -221,42 +300,126 @@ export function windowOf(services, session, events) {
   if (Array.isArray(events)) {
     for (const event of events) {
       if (event?.type !== 'request/context') continue
-      const candidate = positiveInt(event.data?.contextWindow)
+      const raw = event.data?.contextWindow
+      const candidate = plausibleWindow(raw)
       if (candidate !== null) window = candidate
+      else if (positiveInt(raw) !== null) implausible = true
     }
   }
-  return window === null
-    ? { windowTokens: null, source: 'unavailable' }
-    : { windowTokens: window, source: 'request-context' }
+  if (window !== null) return { windowTokens: window, source: 'request-context' }
+  return { windowTokens: null, source: implausible ? 'implausible-window' : 'unavailable' }
 }
 
 /**
- * La taille de CE QU'UN FORK HERITERAIT : les noeuds de surface clos.
- *
- * Deux sources, dans cet ordre, et la source retenue est rendue a l'appelant :
- *   1. 'tokenMeter'.measure(session).nodes -> champ 'tokens' (prix de la ROUTE,
- *      images comprises) ;
- *   2. 'sessionProjections'.stateOf(session, 'contextBreakdown').nodes -> champ
- *      'heuristicTokens' (estimateur fixe du harnais, 4 caracteres/token).
- * Aucune des deux : 'null'. On ne devine pas.
+ * La pression de PROMPT d'un echantillon d'usage, comme le harnais la calcule
+ * ('dsh-token-meter/lib/index.js:387') : entree non cachee + lectures + ecritures
+ * de cache. La SORTIE n'en fait pas partie — elle ne grandit pas avec le tour.
  */
-export function inheritedOf(services, session, boundary) {
-  if (boundary < 0) return { inheritedTokens: 0, source: 'no-completed-turn' }
+export function promptTokensOf(usage) {
+  if (typeof usage?.inputTokens !== 'number' || !Number.isFinite(usage.inputTokens)) return null
+  const read = typeof usage.cacheReadTokens === 'number' && Number.isFinite(usage.cacheReadTokens) ? usage.cacheReadTokens : 0
+  const write = typeof usage.cacheWriteTokens === 'number' && Number.isFinite(usage.cacheWriteTokens) ? usage.cacheWriteTokens : 0
+  const total = usage.inputTokens + read + write
+  return Number.isFinite(total) && total > 0 ? total : null
+}
+
+/** L'usage porte par un evenement d'assistant : forme durable d'abord, flux ensuite. */
+export function usageOfEvent(event) {
+  if (event?.type !== 'assistant/message' && event?.type !== 'assistant/attempt') return null
+  const direct = promptTokensOf(event.data?.usage)
+  if (direct !== null) return direct
+  const stream = event.data?.stream
+  if (!Array.isArray(stream)) return null
+  for (let index = stream.length - 1; index >= 0; index--) {
+    const record = stream[index]
+    const found = promptTokensOf(record?.usage ?? record?.chunk?.usage)
+    if (found !== null) return found
+  }
+  return null
+}
+
+/**
+ * CE QUE LE FORK TRANSMET VRAIMENT : la derniere pression de prompt rapportee par
+ * le fournisseur AVANT la frontiere.
+ *
+ * Mesuree sur les EVENEMENTS du prefixe, jamais sur la surface : une compaction
+ * posterieure a la frontiere retire des noeuds de surface, mais elle n'efface
+ * aucun evenement — et le fork, lui, tranche des POSITIONS DE JOURNAL
+ * ('dsh-subagent-fork-in-process/lib/index.js:23-28'). C'est la seule source
+ * qu'une compaction ne peut pas faire disparaitre sous la mesure.
+ */
+export function prefixUsageOf(events, boundary) {
+  if (!Array.isArray(events) || boundary < 0) return null
+  let tokens = null
+  for (const event of events) {
+    const seq = event?.seq
+    if (typeof seq !== 'number' || seq > boundary) continue
+    const found = usageOfEvent(event)
+    if (found !== null) tokens = found
+  }
+  return tokens
+}
+
+/** Le tour OUVERT d'apres le journal, ou null quand il n'est pas lisible. */
+export function openTurnOf(events) {
+  if (!Array.isArray(events)) return null
+  let turn = null
+  for (const event of events) {
+    if (event?.type !== 'turn/start') continue
+    const value = event.data?.turn
+    if (typeof value === 'number' && Number.isInteger(value)) turn = value
+  }
+  return turn
+}
+
+/** La surface RETENUE close : le meter d'abord, la composition ensuite. */
+function retainedSurfaceOf(services, session, boundary) {
   try {
     const measurement = services.tokenMeter?.measure?.(session)
     const total = sumClosedNodes(measurement?.nodes, boundary, 'tokens')
-    if (total !== null) return { inheritedTokens: total, source: 'token-meter' }
+    if (total !== null) return { tokens: total, source: 'token-meter' }
   } catch {
     // On passe a la source suivante.
   }
   try {
     const state = services.sessionProjections?.stateOf?.(session, 'contextBreakdown')
     const total = sumClosedNodes(state?.nodes, boundary, 'heuristicTokens')
-    if (total !== null) return { inheritedTokens: total, source: 'context-breakdown' }
+    if (total !== null) return { tokens: total, source: 'context-breakdown' }
   } catch {
     // Idem.
   }
-  return { inheritedTokens: null, source: 'unavailable' }
+  return null
+}
+
+/**
+ * La taille de CE QU'UN FORK HERITERAIT — deux vues du MEME prefixe, et l'on
+ * garde la PLUS GRANDE.
+ *
+ *   1. 'prefix-usage' — la derniere pression de prompt du fournisseur avant la
+ *      frontiere, lue sur les EVENEMENTS : c'est la source que le fork tranche,
+ *      et aucune compaction posterieure ne peut la retirer ;
+ *   2. 'token-meter' / 'context-breakdown' — la somme des noeuds de surface clos.
+ *
+ * POURQUOI LE MAXIMUM, et pas l'une ou l'autre seule. La somme de surface est une
+ * vue PLUS PETITE OU EGALE du prefixe des qu'une compaction posterieure a la
+ * frontiere retire des noeuds : mesure du verificateur, elle tombe a ZERO sur un
+ * prefixe de 750 008 tokens ('{inheritedTokens: 0, ratio: 0, verdict: ok}') et la
+ * garde se rouvre sur le fork qu'elle vient de refuser — fabrique par notre propre
+ * compaction differee. La pression du fournisseur, elle, est un MINORANT du
+ * prefixe : elle precede le dernier message du tour clos. Sous-estimer OUVRE la
+ * garde, surestimer la ferme un peu tot ; entre les deux erreurs, la seconde est
+ * la seule qui protege. Aucune des deux vues : 'null', on ne devine pas.
+ */
+export function inheritedOf(services, session, boundary, events) {
+  if (boundary < 0) return { inheritedTokens: 0, source: 'no-completed-turn' }
+  const prefix = prefixUsageOf(events, boundary)
+  const surface = retainedSurfaceOf(services, session, boundary)
+  if (prefix === null && surface === null) return { inheritedTokens: null, source: 'unavailable' }
+  if (surface === null) return { inheritedTokens: prefix, source: 'prefix-usage' }
+  if (prefix === null) return { inheritedTokens: surface.tokens, source: surface.source }
+  return prefix > surface.tokens
+    ? { inheritedTokens: prefix, source: 'prefix-usage' }
+    : { inheritedTokens: surface.tokens, source: surface.source }
 }
 
 /**
@@ -273,7 +436,7 @@ export function inheritedOf(services, session, boundary) {
 export function measure(services, session, threshold) {
   const events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : undefined
   const boundary = boundarySeqOf(events)
-  const inherited = inheritedOf(services, session, boundary)
+  const inherited = inheritedOf(services, session, boundary, events)
   const window = windowOf(services, session, events)
   const ratio = inherited.inheritedTokens === null || window.windowTokens === null
     ? null
@@ -419,13 +582,16 @@ export function apply(ctx, config = {}) {
   }
   const journal = (entry) => writeJournal(config.home ?? dshHome(), entry)
   const threshold = resolveThreshold(config.forkThresholdRatio, journal)
-  const stats = { measured: 0, refused: 0, passed: 0, compacted: 0, compact_failed: 0, unknown: 0 }
-  // Une session dont le tour courant a subi un refus. Un booleen SUFFIT : un
-  // refus ne peut naitre que dans un tour, et le tour ne se ferme qu'une fois.
-  const refusedThisTurn = new Set()
+  const forkTools = resolveForkTools(config.forkToolNames, journal)
+  const guarded = new Set(forkTools)
+  const stats = { measured: 0, refused: 0, passed: 0, compacted: 0, compact_failed: 0, unknown: 0, arm_orphaned: 0, arm_unbounded: 0 }
+  // Une session dont le tour courant a subi un refus, AVEC LE TOUR. Un booleen ne
+  // suffirait pas : l'armement survivrait a un tour qui ne se ferme JAMAIS, et
+  // tirerait sur le premier 'turn/end' venu — un tour etranger, sans rapport.
+  const refusedThisTurn = new Map()
   const inflight = new Set()
 
-  journal({ step: 'mounted', pid: process.pid, threshold })
+  journal({ step: 'mounted', pid: process.pid, threshold, forkTools: forkTools.join(',') })
 
   const measureFor = (session) => {
     const value = measure(services, session, threshold)
@@ -436,6 +602,7 @@ export function apply(ctx, config = {}) {
 
   const controller = {
     threshold,
+    forkTools,
     stats,
     measureFor,
     /** Attend les compactions differees en vol — la seule attente qu'un test doit faire. */
@@ -483,7 +650,10 @@ export function apply(ctx, config = {}) {
   // decision sans appeler 'next()' COUPERAIT la chaine des autres politiques
   // (approbation, sandbox), ce qui serait un degat collateral silencieux.
   ctx.on('tools/pre-execute', async (exec, next) => {
-    if (exec?.name !== FORK_TOOL) return next()
+    // Le nom garde vient de la CONFIGURATION ('forkToolNames'). Voir 'FORK_TOOL'
+    // pour la LIMITE : le fork se reconnait a son nom, qui est une valeur du
+    // preset, et non a son fournisseur — 'exec' n'en porte aucun.
+    if (!guarded.has(exec?.name)) return next()
     let verdict
     try {
       verdict = measureFor(exec?.agent?.session)
@@ -502,10 +672,24 @@ export function apply(ctx, config = {}) {
       return next()
     }
     stats.refused++
-    // Le refus ARME la compaction differee du tour courant — c'est elle qui rend
+    // Le refus ARME la compaction differee du tour COURANT — c'est elle qui rend
     // la regle executable, puisque l'agent ne peut pas se compacter lui-meme
-    // pendant qu'il appelle un outil.
-    if (typeof id === 'string' && id !== '') refusedThisTurn.add(id)
+    // pendant qu'il appelle un outil. L'armement porte le TOUR, jamais un simple
+    // booleen : un tour qui ne se ferme jamais ne doit pas faire compacter le
+    // suivant.
+    if (typeof id === 'string' && id !== '') {
+      let turn = null
+      try {
+        turn = openTurnOf(exec?.agent?.session?.snapshotEvents?.())
+      } catch {
+        turn = null
+      }
+      refusedThisTurn.set(id, turn)
+      if (turn === null) {
+        stats.arm_unbounded++
+        journal({ step: 'fork-arm-unbounded', id: safeKey(id), why: 'turn/start illisible : l armement se consommera au prochain turn/end' })
+      }
+    }
     const reason = refusalMessage(verdict.inheritedTokens, verdict.windowTokens, verdict.ratio, threshold)
     journal({
       step: 'fork-refused',
@@ -575,9 +759,22 @@ export function apply(ctx, config = {}) {
     if (event?.type !== 'turn/end') return
     const id = session?.id
     if (typeof id !== 'string' || id === '') return
-    // Une compaction PAR TOUR, jamais deux : le drapeau est consomme ici, et ne
-    // peut etre repose que par un refus du tour SUIVANT.
-    if (!refusedThisTurn.delete(id)) return
+    if (!refusedThisTurn.has(id)) return
+    const armed = refusedThisTurn.get(id)
+    // Consomme dans TOUS les cas : un armement ne survit jamais a son tour, et ne
+    // peut etre repose que par un refus du tour SUIVANT (une compaction par tour,
+    // jamais deux).
+    refusedThisTurn.delete(id)
+    const closing = typeof event.data?.turn === 'number' && Number.isInteger(event.data.turn) ? event.data.turn : null
+    if (armed !== null && closing !== null && armed !== closing) {
+      // Le tour du refus ne s'est JAMAIS ferme (arret, annulation, disparition de
+      // l'agent) : ce 'turn/end'-ci appartient a un AUTRE tour. Compacter ici
+      // agirait sur une session qui n'a rien a voir avec le refus — on le
+      // journalise et on s'arrete la.
+      stats.arm_orphaned++
+      journal({ step: 'fork-arm-orphaned', id: safeKey(id), armedTurn: armed, closingTurn: closing })
+      return
+    }
     track(compactAfterTurn(id))
   })
 
