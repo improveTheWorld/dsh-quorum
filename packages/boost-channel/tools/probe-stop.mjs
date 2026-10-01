@@ -13,7 +13,7 @@
 // ('@deepseek-ai/dsh-agent') et la VRAIE ligne du plugin sur une vraie
 // application cordis, puis il MESURE :
 //
-//   1. 'turn/end' atteint-il un listener de ligne HOTE, pour la session d'un
+//   1. 'turn/end' atteint-il un listener SANS tag de portee, pour la session d'un
 //      ENFANT ? (l'enfant est entre par la portee de l'appelant : la reponse
 //      n'est pas dans la documentation, elle est dans le dispatch) ;
 //   2. a cet instant, l'etat re-derive est-il 'blocked' — c'est-a-dire l'enfant
@@ -173,28 +173,50 @@ try {
   if (pulledByOwner.count < 1) failures.push('le proprietaire ne voit pas les messages de son arbre')
   if (pulledByChild.count !== 0) failures.push('un enfant voit des messages qui ne lui sont pas adresses')
 
-  // ---- 5. CONTROLE DE PORTEE : pourquoi la ligne doit etre HOTE -------------
-  // Le feed est dispatche avec le porteur de la session, dont la cle de portee est
-  // celle du contexte du MAGASIN (la racine de l'application). Un listener enregistre
-  // SOUS la racine porte un tag, et « un tag SOUS la cle de dispatch reste exclu ».
-  // La consequence est directement operationnelle : une ligne montee dans une portee
-  // de preset ne verrait AUCUN arret, donc ne reveillerait jamais personne.
+  // ---- 5. CONTROLE DE PORTEE : le TAG, jamais le niveau --------------------
+  // 'scopeTarget' ('dsh-scope/lib/index.js:327-337') admet TOUT listener sans tag,
+  // puis n'admet un listener TAGUE que si son tag est sur la chaine de la cle du
+  // porteur. Ce qui decide n'est donc pas le NIVEAU DE MONTAGE mais le TAG — et la
+  // cle du porteur differe d'un evenement a l'autre :
+  //   - 'session/event' : porteur 'scopeTarget(session, scopeOf(this.ctx))'
+  //     ('dsh-session/lib/index.js:1736'), cle = la portee du MAGASIN, donc aucune
+  //     quand le magasin est a la racine : un listener tague n'y est jamais admis ;
+  //   - 'agent/disposed' : porteur 'scopeTarget(agent, agent)'
+  //     ('dsh-agent/lib/index.js:513'), cle = l'AGENT lui-meme : un listener tague
+  //     par l'agent, ou par un ancetre declare ('bindScopeParent'), EST admis.
   const childD = root.sessions.create('session-child-d', { meta: { cwd: process.cwd(), parentSession: 'session-root' } })
-  let hostSeen = 0
-  let scopedSeen = 0
-  await root.plugin({ name: 'probe-host-listener', apply: (ctx) => { ctx.on('session/event', () => { hostSeen++ }) } })
-  const scopeKey = {}
-  const scoped = createScope(root, scopeKey)
-  await scoped.ctx.plugin({ name: 'probe-scoped-listener', apply: (ctx) => { ctx.on('session/event', () => { scopedSeen++ }) } })
+  let rootUntagged = 0
+  let childFiberUntagged = 0
+  let presetTagged = 0
+  await root.plugin({ name: 'probe-untagged-root', apply: (ctx) => { ctx.on('session/event', () => { rootUntagged++ }) } })
+  await root.plugin({ name: 'probe-untagged-child-fiber', apply: (ctx) => { ctx.on('session/event', () => { childFiberUntagged++ }) } })
+  const presetKey = {}
+  const presetScope = createScope(root, presetKey)
+  await presetScope.ctx.plugin({ name: 'probe-tagged-preset', apply: (ctx) => { ctx.on('session/event', () => { presetTagged++ }) } })
   childD.append('turn/start', { turn: 1 })
   childD.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   await tick(30)
-  say('controle-portee', 'listener HOTE: ' + hostSeen + ' evenement(s) · listener SOUS la racine: ' + scopedSeen
-    + ' — une ligne montee sous la racine ne voit aucun arret')
-  if (hostSeen === 0) failures.push('le feed session/event n atteint pas la racine : la mesure ne prouve rien')
-  if (scopedSeen !== 0) failures.push('un listener de portee inferieure voit le feed : la portee hote n est pas une condition')
-  scoped.dispose()
+  say('controle-portee-session', 'SANS tag (racine)=' + rootUntagged + ' · SANS tag (fiber enfant de la racine)='
+    + childFiberUntagged + ' · TAGUE par une portee=' + presetTagged
+    + ' — le discriminant est le TAG, pas le niveau de montage')
+  if (rootUntagged === 0 || childFiberUntagged === 0) failures.push('un listener SANS tag ne voit pas le feed : la mesure ne prouve rien')
+  if (presetTagged !== 0) failures.push('un listener TAGUE voit le feed de session : le tag ne filtre pas')
 
+  // Le meme tag, sur un evenement dont la cle est l'AGENT : il est admis.
+  let presetDisposed = 0
+  await presetScope.ctx.plugin({ name: 'probe-tagged-preset-disposed', apply: (ctx) => { ctx.on('agent/disposed', () => { presetDisposed++ }) } })
+  const childE = root.sessions.create('session-child-e', { meta: { cwd: process.cwd(), parentSession: 'session-root' } })
+  const workerE = { ...makeAgent(childE, 'session-root', 'running'), ctx: stubCtx }
+  const workerScope = createScope(presetScope.ctx, workerE, { parent: presetKey })
+  workerE.ctx = workerScope.ctx
+  const disposeE = root.agents.register(workerE)
+  await tick(50)
+  disposeE()
+  await tick(30)
+  say('controle-portee-disposed', 'TAGUE par la portee du preset: ' + presetDisposed
+    + ' agent/disposed — sa cle est l agent, dont la chaine remonte au preset : admis')
+  if (presetDisposed === 0) failures.push('agent/disposed n atteint pas un listener tague par un ancetre de l agent : la cle du porteur n est pas l agent')
+  presetScope.dispose()
   // La trace brute du plugin : les decisions telles qu'elles ont ete prises.
   const journal = readFileSync(join(scratch, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
     .split('\n').filter((line) => line.includes('"wake-reeval"') || line.includes('"step":"stop"') || line.includes('"read-refused"'))

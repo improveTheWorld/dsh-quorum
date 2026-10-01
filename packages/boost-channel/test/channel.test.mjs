@@ -54,7 +54,7 @@ function fakeTree() {
 }
 
 /** Un canal sur un arbre factice, dans un DSH_HOME jetable. */
-function mount({ clock = { at: 0 }, keep, maxBytes, readLimit } = {}) {
+function mount({ clock = { at: 0 }, keep, maxBytes, readLimit, limiter } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-channel-'))
   const tree = fakeTree()
   const root = tree.add('session-root', 'running')
@@ -73,6 +73,7 @@ function mount({ clock = { at: 0 }, keep, maxBytes, readLimit } = {}) {
     keep,
     maxBytes,
     readLimit,
+    limiter,
   })
   return { home, tree, root, child, channel, clock }
 }
@@ -531,12 +532,22 @@ test('les etats derives et la politique de reveil couvrent la table du §4', () 
   assert.equal(wakePolicy('avancement', 'failed'), 'wake')
   assert.equal(wakePolicy('decouverte', 'done'), 'inject')
 
-  // L'eligibilite au reveil DIFFERE : ce qui attend un arret, et ce qui n'attend rien.
-  assert.equal(isWakeEligible('question', 'running'), true)
-  assert.equal(isWakeEligible('resultat', 'running'), true)
-  assert.equal(isWakeEligible('decouverte', 'failed'), true, 'un echec se constate, il ne se declare pas')
-  assert.equal(isWakeEligible('avancement', 'running'), false)
-  assert.equal(isWakeEligible('decouverte', 'done'), false)
+  // L'eligibilite au reveil DIFFERE depend du KIND SEUL. L'etat est une
+  // annotation : il garde son role dans la table ('done' / 'blocked' decide si un
+  // 'resultat' est decide ou reste en attente), mais il ne promeut plus un
+  // 'avancement' en reveil. Un echec qui doit reveiller se DECLARE : 'echec'.
+  assert.equal(isWakeEligible('question'), true)
+  assert.equal(isWakeEligible('resultat'), true)
+  assert.equal(isWakeEligible('echec'), true)
+  assert.equal(isWakeEligible('avancement'), false)
+  assert.equal(isWakeEligible('decouverte'), false)
+  assert.equal(isWakeEligible('avancement', 'failed'), false, 'un etat ne rend pas eligible')
+
+  // 'echec' reveille des que l'emetteur s'arrete : c'est le seul kind qui porte
+  // l'urgence lui-meme.
+  assert.equal(wakePolicy('echec', 'blocked'), 'wake')
+  assert.equal(wakePolicy('echec', 'done'), 'wake')
+  assert.equal(wakePolicy('echec', 'failed'), 'wake')
 
   // L'etat derive A L'ARRET : la branche 'running' disparait, et ce n'est pas un
   // oubli — l'arret observe est la preuve que l'emetteur a cesse de produire,
@@ -715,13 +726,187 @@ test('T-A4 : read_refused figure dans stats() et dans le journal, avec son motif
   }
 })
 
+// T-B1 et T-B2 : LA FRONTIERE DE L'OUTIL. Mesure du verificateur independant :
+// le harnais passe 'exec.arguments' tel quel au corps ('dsh-tools/lib/index.js:3310')
+// et ne rejette une cle non declaree que si le schema porte
+// 'additionalProperties: false' ('dsh-tools' :467-468). Un enfant pouvait donc
+// adresser un FRERE, ecrire dans le magasin d'un AUTRE ARBRE, et ouvrir un tour
+// du proprietaire de cet autre arbre.
+test('T-B1 : channel_post ignore un argument non declare et le journalise', async () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const sibling = tree.add('session-sibling', 'running', 'session-root')
+    const [post] = buildTools(channel)
+    const posted = await post.execute(
+      { kind: 'question', summary: 'chez moi', to: sibling.id, root: 'session-other-root' },
+      { agent: child },
+    )
+    assert.equal(posted.wake, 'pending', 'le tour de l appelant n est PAS casse')
+    const [stored] = channel.storeFor('session-root').load()
+    assert.equal(stored.to, 'session-root', 'le destinataire reste la racine de SON arbre')
+    assert.equal(channel.storeFor('session-other-root').load().length, 0, 'aucun magasin etranger n est touche')
+    assert.deepEqual(tree.calls.filter((call) => call.to === sibling.id), [], 'aucun envoi vers un frere')
+    const journal = readFileSync(join(home, 'plugin-data', 'dsh-boost-channel', 'decisions.jsonl'), 'utf8')
+      .split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+    const undeclared = journal.filter((row) => row.step === 'undeclared-argument')
+    assert.equal(undeclared.length, 1, 'l argument ignore est journalise, jamais muet')
+    assert.equal(undeclared[0].tool, 'channel_post')
+    assert.deepEqual(undeclared[0].keys, ['to', 'root'])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('T-B2 : channel_post ignore un argument root non declare — le message reste dans SON arbre', async () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    tree.add('session-other-root', 'running')
+    const [post] = buildTools(channel)
+    const posted = await post.execute({ kind: 'question', summary: 'x', root: 'session-other-root' }, { agent: child })
+    assert.equal(posted.wake, 'pending')
+    assert.equal(posted.id, 'session-child:1', 'l id n est pas qualifie : le magasin est le sien')
+    assert.equal(channel.storeFor('session-root').load().length, 1, 'le message est dans SON magasin')
+    assert.equal(channel.storeFor('session-other-root').load().length, 0, 'le magasin etranger est intact')
+    assert.deepEqual(tree.calls, [], 'aucun appel vers le proprietaire d un autre arbre')
+    assert.equal(channel.stopped(child.id, { why: 'turn/end' }).wake_sent, 1, 'le message de SON arbre est decide')
+    assert.deepEqual(tree.calls.map((call) => call.to), ['session-root'])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-B3 : la meme frontiere sur la lecture. Sans elle, 'root'/'from' non declares
+// redirigeaient la lecture et feraient marquer lu le message d'un autre arbre.
+test('T-B3 : channel_read ignore root et from non declares — le controle de destinataire tient', async () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    tree.add('session-other-root', 'running')
+    const outsider = tree.add('session-other-child', 'running', 'session-other-root')
+    channel.post({ from: outsider.id, kind: 'avancement', summary: 'message d un autre arbre' })
+    const [, read] = buildTools(channel)
+    const viaRoot = await read.execute({ root: 'session-other-root' }, { agent: child })
+    assert.equal(viaRoot.count, 0, 'root ne redirige pas la lecture')
+    const viaFrom = await read.execute({ from: 'session-other-root' }, { agent: child })
+    assert.equal(viaFrom.count, 0, 'from ne fait pas lire a la place d un autre')
+    assert.equal(channel.stats().read_refused, 2)
+    // La lecture refusee n a RIEN marque : le message de l autre arbre est encore
+    // 'only_unread' pour son proprietaire.
+    assert.equal(channel.read({ from: 'session-other-root', only_unread: true }).length, 1)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-B4 et T-B7 : L'INDEX DES ATTENTES. '<de>:<seq>' n'est unique que DANS un
+// magasin ; indexer sur (de, id) faisait disparaitre un message quand un meme
+// emetteur en depositait deux, de meme id, dans deux magasins — le second
+// ecrasait le premier, et le premier n'etait plus jamais decide.
+test('T-B4 : deux depots eligibles du meme emetteur dans deux magasins -> chacun est decide', () => {
+  const { home, tree, child, channel } = mount({ limiter: new WakeLimiter({ now: () => 0, perChild: 5, perTree: 5 }) })
+  try {
+    tree.add('session-other-root', 'running')
+    const first = channel.post({ from: child.id, kind: 'question', summary: 'chez moi' })
+    const second = channel.post({ from: child.id, kind: 'echec', summary: 'ailleurs', root: 'session-other-root' })
+    assert.notEqual(first.id, second.id, 'deux magasins, deux identites distinctes')
+    assert.equal(second.id, 'session-other-root:session-child:1', 'un depot hors de son arbre qualifie l id')
+    assert.equal(channel.stats().wake_pending, 2, 'les DEUX messages attendent leur arret')
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.evaluated, 2, 'les deux sont decides, chacun dans son magasin')
+    assert.equal(report.wake_sent, 2)
+    assert.deepEqual(tree.calls.map((call) => call.to).sort(), ['session-other-root', 'session-root'])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-B8 : LA DEFENSE EN PROFONDEUR. L'id qualifie (T-B4) empeche la collision par
+// la voie normale ; mais l'id EXPLICITE est une capacite du service interne, et
+// c'est elle qui peut encore produire deux fois la meme identite dans deux
+// magasins. L'index doit donc porter la racine pour lui-meme.
+test('T-B8 : deux messages de MEME id dans deux magasins sont decides chacun dans le sien', () => {
+  const { home, tree, child, channel } = mount({ limiter: new WakeLimiter({ now: () => 0, perChild: 5, perTree: 5 }) })
+  try {
+    tree.add('session-other-root', 'running')
+    const first = channel.post({ from: child.id, kind: 'question', summary: 'chez moi', id: 'commun:1' })
+    const second = channel.post({ from: child.id, kind: 'question', summary: 'ailleurs', root: 'session-other-root', id: 'commun:1' })
+    assert.equal(first.id, second.id, 'la meme identite, dans deux magasins')
+    assert.equal(channel.stats().wake_pending, 2, 'deux attentes distinctes, malgre une identite identique')
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.evaluated, 2, 'chacune est decidee dans SON magasin')
+    assert.equal(report.wake_sent, 2)
+    assert.deepEqual(tree.calls.map((call) => call.to).sort(), ['session-other-root', 'session-root'])
+    assert.equal(channel.storeFor('session-root').load()[0].wake_pending, false)
+    assert.equal(channel.storeFor('session-other-root').load()[0].wake_pending, false)
+    assert.equal(channel.stats().wake_pending, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('T-B7 : la jauge wake_pending retombe a 0 apres decision, dans les deux magasins', () => {
+  const { home, tree, child, channel } = mount({ limiter: new WakeLimiter({ now: () => 0, perChild: 5, perTree: 5 }) })
+  try {
+    tree.add('session-other-root', 'running')
+    channel.post({ from: child.id, kind: 'question', summary: 'chez moi' })
+    channel.post({ from: child.id, kind: 'resultat', summary: 'ailleurs', root: 'session-other-root' })
+    assert.equal(channel.stats().wake_pending, 2)
+    tree.remove(child.id) // l emetteur quitte le registre : etat re-derive 'done'
+    channel.stopped(child.id, { why: 'agent/disposed' })
+    assert.equal(channel.stats().wake_pending, 0, 'la jauge ne compte plus rien')
+    assert.equal(channel.storeFor('session-root').load()[0].wake_pending, false)
+    assert.equal(channel.storeFor('session-other-root').load()[0].wake_pending, false)
+    assert.equal(channel.storeFor('session-root').load()[0].state, 'done', 'l etat re-derive est ecrit dans les deux magasins')
+    assert.equal(channel.storeFor('session-other-root').load()[0].state, 'done')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-B5 : « un avancement ne reveille personne » redevient vrai. Un etat 'failed'
+// ne promeut plus un kind : l'eligibilite depend du KIND SEUL.
+test('T-B5 : un avancement depose avec un etat failed ne reveille PAS', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    child.failed = true
+    const posted = channel.post({ from: child.id, kind: 'avancement', summary: 'un outil a echoue' })
+    assert.equal(posted.state, 'failed', 'l etat reste constate')
+    assert.equal(posted.wake, 'injected', 'le kind SEUL rend eligible : un avancement se livre, il ne reveille pas')
+    assert.equal(channel.stats().wake_pending, 0)
+    assert.equal(channel.storeFor('session-root').load()[0].wake_pending, undefined, 'aucun marqueur d attente')
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.evaluated, 0, 'rien n attend, donc rien n est decide')
+    assert.equal(channel.stats().wake_sent, 0)
+    assert.deepEqual(tree.calls.map((call) => call.method), ['inject'], 'un inject, jamais un tour')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// T-B6 : l'echec qui doit reveiller se DECLARE.
+test('T-B6 : le kind echec est eligible au reveil differe', () => {
+  const { home, tree, child, channel } = mount()
+  try {
+    const posted = channel.post({ from: child.id, kind: 'echec', summary: 'la suite echoue' })
+    assert.equal(posted.wake, 'pending')
+    assert.equal(channel.stats().wake_pending, 1)
+    assert.deepEqual(tree.calls, [], 'aucun reveil au depot')
+    const report = channel.stopped(child.id, { why: 'turn/end' })
+    assert.equal(report.state, 'blocked')
+    assert.equal(report.wake_sent, 1)
+    assert.equal(tree.calls[0].method, 'send')
+    assert.equal(tree.calls[0].wakeup, true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('buildTools rend exactement les deux outils documentes', () => {
   const { home, channel } = mount()
   try {
     assert.deepEqual(buildTools(channel).map((tool) => tool.name), ['channel_post', 'channel_read'])
     const [post, read] = buildTools(channel)
     assert.deepEqual(post.parameters.required, ['kind', 'summary'])
-    assert.deepEqual(post.parameters.properties.kind.enum, ['decouverte', 'avancement', 'question', 'resultat'])
+    assert.deepEqual(post.parameters.properties.kind.enum, ['decouverte', 'avancement', 'question', 'resultat', 'echec'])
     assert.equal(typeof post.output.render, 'function', 'le registre REFUSE un outil sans output.render')
     assert.equal(typeof read.output.render, 'function')
   } finally {

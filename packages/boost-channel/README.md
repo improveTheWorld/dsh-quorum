@@ -16,10 +16,10 @@ Une enveloppe STRUCTUREE, jamais la charge utile (D13) :
 
 | champ | sens |
 |---|---|
-| 'id' | '<from>:<seq>' — l'identite, et la seule cle de deduplication (jamais le texte) |
-| 'kind' | ce que l'appelant DECLARE : 'decouverte' · 'avancement' · 'question' · 'resultat' |
+| 'id' | '<from>:<seq>' — l'identite DANS le magasin, et la seule cle de deduplication (jamais le texte). Un depot dans un autre magasin (service interne) porte un id qualifie par la racine, '<racine>:<from>:<seq>' |
+| 'kind' | ce que l'appelant DECLARE : 'decouverte' · 'avancement' · 'question' · 'resultat' · 'echec' |
 | 'state' | ce que le runtime DERIVE : 'running' · 'blocked' · 'done' · 'failed' — re-derive A L'ARRET pour un message qui attendait |
-| 'to' | le DESTINATAIRE : la racine de l'arbre, ou une session nommee. C'est lui que la lecture applique |
+| 'to' | le DESTINATAIRE : la racine de l'arbre, ou une session nommee. C'est lui que la lecture applique. Capacite du SERVICE INTERNE, jamais de la surface des outils |
 | 'target' + 'revision' + 'verdict' | le verdict attache a une cible (§8) : deux verdicts opposes sur la meme cible deviennent une donnee |
 | 'summary' | texte court, PLAFOND DUR de 2000 caracteres, troncature VISIBLE ('truncated: true') |
 | 'payloadRef' | un CHEMIN vers la preuve brute — jamais son contenu — et 'payloadChars' sa taille |
@@ -35,17 +35,24 @@ rendait donc les reveils 'question'+'blocked' et 'resultat'+'done' **inatteignab
 et toute la table du §4 du code mort.
 
 Le canal stocke donc le message, marque 'wake_pending: true' quand son kind est
-**eligible** ('question', 'resultat', ou un etat 'failed' — l'echec ne se declare
-pas, il se constate), et **ne decide rien**. La decision est prise quand
-l'emetteur s'arrete :
+**eligible**, et **ne decide rien**. La decision est prise quand l'emetteur
+s'arrete :
+
+**L'eligibilite depend du KIND SEUL — 'question', 'resultat', 'echec' — jamais de
+l'etat.** Un etat ne promeut pas un kind : un 'avancement' dont le dernier
+resultat d'outil est en erreur se livre par injection et **ne reveille
+personne**, meme avec 'state: failed'. C'est ce qui rend le battement de coeur
+abordable (un tour de mere coute ~28x une session mediane). Un echec qui doit
+reveiller se DECLARE, avec le kind 'echec'.
 
 | kind declare | etat derive A L'ARRET | decision |
 |---|---|---|
-| 'decouverte' / 'avancement' | (n'importe lequel) | injecte au depot : un battement de coeur n'attend rien |
+| 'decouverte' / 'avancement' | (n'importe lequel, meme 'failed') | injecte au depot : un battement de coeur n'attend rien et ne reveille jamais |
 | 'question' | 'blocked' | **reveil** ('Agent.send(message, "next-step", true)') |
 | 'resultat' | 'done' | **reveil** — une fois, et l'idempotence le garantit |
 | 'resultat' | 'blocked' | rien encore : l'emetteur est vivant. Le message RESTE en attente ; sa sortie du registre le decidera |
-| n'importe lequel | 'failed' | **reveil** |
+| 'echec' | 'blocked' / 'done' / 'failed' | **reveil** : c'est le seul kind qui porte l'urgence lui-meme |
+| 'question' / 'resultat' / 'echec' | 'failed' | **reveil** |
 | 'question' | 'done' | **retrogradation** : 'wake_refused', ni reveil ni injection |
 
 **Retrogradation (§6)** : elle se prononce AU POINT DE DECISION, et elle a deux
@@ -93,15 +100,27 @@ laisserait 'resultat'+'done' inatteignable (le tour se ferme alors que l'enfant 
 encore vivant) ; prendre 'agent/disposed' seul laisserait 'question'+'blocked'
 inatteignable. Le probe est la mesure, pas l'argument.
 
-**La ligne doit etre HOTE, et ce n'est pas un confort** : le feed est dispatche avec
-le porteur de la session, dont la cle de portee est celle du contexte du MAGASIN (la
-racine de l'application). Un listener enregistre sous la racine porte un tag, et un
-tag SOUS la cle de dispatch reste exclu. Mesure :
+**Ce qui decide de la livraison est le TAG DE PORTEE, pas le niveau de montage.**
+Correction d'une affirmation fausse de la passe precedente : 'scopeTarget'
+('dsh-scope/lib/index.js:327-337') admet **tout listener SANS tag**, puis n'admet un
+listener TAGUE que si son tag est sur la chaine de la cle du PORTEUR — et cette cle
+differe d'un evenement a l'autre. Mesure :
 
-    PROBE-controle-portee: listener HOTE: 2 evenement(s) · listener SOUS la racine: 0
+    PROBE-controle-portee-session: SANS tag (racine)=2 · SANS tag (fiber enfant de la racine)=2 · TAGUE par une portee=0
+    PROBE-controle-portee-disposed: TAGUE par la portee du preset: 1 agent/disposed
 
-Une ligne montee dans une portee de preset ne verrait donc AUCUN arret — et ne
-reveillerait jamais personne.
+- pour 'session/event', le porteur est 'scopeTarget(session, scopeOf(this.ctx))'
+  ('dsh-session/lib/index.js:1736') : sa cle est la portee du MAGASIN, donc **aucune**
+  quand le magasin est a la racine. Un listener tague n'y est jamais admis — monter
+  la ligne dans une portee de preset lui ferait perdre tous les arrets ;
+- pour 'agent/disposed', le porteur est 'scopeTarget(agent, agent)'
+  ('dsh-agent/lib/index.js:513') : sa cle est **l'agent**, dont la chaine remonte au
+  preset ('bindScopeParent'). Un listener tague par un ancetre de l'agent est donc
+  admis.
+
+Une ligne HOTE a la racine reste la bonne configuration — parce qu'elle est SANS
+tag, et parce qu'elle seule voit 'agents' et tous les agents — mais la raison n'est
+pas un « niveau » : c'est le tag.
 
 A l'arret, l'etat est re-derive par 'stoppedState' — 'deriveState' prive de sa
 branche 'running', et ce n'est pas un oubli : l'arret observe EST la preuve que
@@ -139,6 +158,38 @@ l'enregistre, le journal porte '{"step":"read-refused", from, root, why:"not-add
 et **aucun marqueur de lecture n'est ecrit** — le message reste 'only_unread' vrai
 pour le proprietaire. Un refus silencieux serait indistinguable d'un canal vide.
 
+## La frontiere de l'outil : les arguments non declares sont IGNORES
+
+Mesure du verificateur : le harnais passe 'exec.arguments' tel quel au corps de
+l'outil ('dsh-tools/lib/index.js:3310') et ne rejette une cle non declaree que si le
+schema porte 'additionalProperties: false' ('dsh-tools' :467-468). Sur un schema
+ouvert, un enfant pouvait donc fournir 'to' et 'root' — et **adresser un frere,
+ecrire dans le magasin d'un AUTRE arbre, et ouvrir un tour du proprietaire de cet
+autre arbre** (mesure : 'send', 'wakeup: true').
+
+Le corps des deux outils ne lit donc QUE des cles declarees :
+
+    channel_post  ->  kind, summary, target, revision, verdict, payloadRef
+    channel_read  ->  since, kinds, only_unread
+
+Toute autre cle est **ignoree** — l'appel n'echoue pas, le tour de l'agent qui
+hallucine un argument n'est pas casse — et **journalisee** :
+'{"step":"undeclared-argument","tool":"channel_post","keys":["to","root"]}'. La
+frontiere est dans le CORPS, pas dans le schema : fermer le schema ferait echouer
+l'appel, ce qui est exactement ce qu'on ne veut pas. 'to' et 'root' restent des
+capacites du service interne.
+
+## L'identite d'une attente inclut son magasin
+
+'<from>:<seq>' n'est unique que DANS un magasin, et un emetteur peut en ecrire deux
+(voie du service interne). L'index des reveils en attente est donc cle par
+'(racine, from, id)' : indexer sur '(from, id)' faisait disparaitre un message quand
+les deux magasins portaient le meme id — le second ecrasait le premier, et le
+message du magasin propre n'etait plus jamais decide. En complement, un depot hors
+de son propre arbre porte un id qualifie par la racine, '<racine>:<from>:<seq>',
+pour que deux messages distincts ne portent jamais la meme chaine dans deux
+fichiers.
+
 ## Les bornes anti-brouillage
 
 - plafond DUR de 2000 caracteres par resume, troncature visible ; coupe en POINTS DE
@@ -157,9 +208,11 @@ Neuf lectures, dont une jauge : 'posted', 'read', 'read_refused', 'delivered',
 'truncated', 'deduped'. Deux voies :
 
 - **service** : 'ctx.get("boostChannel")' rend l'instance ; sa methode est
-  'channel.stats()' (et 'post' / 'read' / 'stopped' pour un appelant de confiance) ;
+  'channel.stats()' (et 'post' / 'read' / 'stopped' pour un appelant de confiance —
+  c'est cette voie qui peut nommer un destinataire 'to' ou un magasin 'root') ;
 - **journal** : '$DSH_HOME/plugin-data/dsh-boost-channel/decisions.jsonl', une ligne par
-  decision ('post', 'stop', 'wake-reeval', 'read', 'read-refused') plus un instantane
+  decision ('post', 'stop', 'wake-reeval', 'read', 'read-refused',
+  'undeclared-argument') plus un instantane
   '{"step":"stats", ...}' apres chacune. Le journal tourne a 8 Mio et n'echoue jamais —
   un diagnostic qui casse ce qu'il observe est pire que rien.
 
@@ -188,6 +241,10 @@ fait »).
   lui sont adressees**, les plus recentes, et les marque lues. 'since' accepte un id
   deja lu ou une date ISO.
 
+Ces listes sont **exhaustives** : toute autre cle de l'appel est ignoree et
+journalisee ('undeclared-argument'). Ni 'to', ni 'root', ni 'from' ne sont de la
+surface.
+
 ## Le montage : une ligne HOTE, des outils installes PAR AGENT — mesure
 
 Un outil enregistre depuis la portee d'une ligne n'atteint jamais la surface composee
@@ -195,6 +252,10 @@ d'un agent : c'est mesure deux fois et ecrit dans
 'packages/boost-mode/cordis.patch.yml:369-384'. Le canal est donc monte au niveau HOTE
 et installe ses deux outils **dans la surface de chaque agent** depuis un listener
 'agent/created' — le motif de 'packages/detached-jobs/lib/index.js:985-1026'.
+La raison, ici, est la PORTEE DE L'ENREGISTREMENT (un outil enregistre depuis la
+portee d'une ligne n'atteint pas la surface composee) ; ce n'est pas le TAG DE
+PORTEE, qui decide lui de la livraison du feed — deux mecanismes distincts, mesures
+par deux probes distincts.
 
 L'inconnue restante etait l'ORDRE avec 'tools.restrict()', que
 'applyChildComposition' ('dsh-subagent/lib/types/child-agent.js:157-172') applique

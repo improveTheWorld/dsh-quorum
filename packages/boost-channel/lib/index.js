@@ -54,7 +54,17 @@ export const KEEP_PER_SENDER = 50
 /** Plafond d'enveloppes rendues par un channel_read. */
 export const READ_LIMIT = 10
 /** Les kinds que l'appelant DECLARE. L'etat, lui, se derive. */
-export const KINDS = ['decouverte', 'avancement', 'question', 'resultat']
+export const KINDS = ['decouverte', 'avancement', 'question', 'resultat', 'echec']
+/**
+ * Les cles que la SURFACE de 'channel_post' accepte — et rien d'autre.
+ *
+ * 'to' et 'root' sont des capacites du SERVICE INTERNE, jamais de la surface :
+ * un enfant qui les fournit adresserait un frere, ecrirait dans le magasin d'un
+ * autre arbre, et ouvrirait un tour du proprietaire de cet autre arbre (mesure).
+ */
+export const POST_ARGUMENTS = ['kind', 'summary', 'target', 'revision', 'verdict', 'payloadRef']
+/** Les cles que la SURFACE de 'channel_read' accepte — et rien d'autre. */
+export const READ_ARGUMENTS = ['since', 'kinds', 'only_unread']
 /** Fenetre du limiteur de cadence. */
 export const WAKE_WINDOW_MS = 120000
 /** Au plus UN reveil par enfant et par fenetre. */
@@ -163,6 +173,9 @@ export function deriveState(facts = {}) {
  */
 export function wakePolicy(kind, state) {
   if (state === 'failed') return 'wake'
+  // 'echec' est le seul kind qui porte lui-meme l'urgence : une fois l'emetteur
+  // arrete, il reveille — quel que soit l'etat constate.
+  if (kind === 'echec') return 'wake'
   if (kind === 'resultat' && state === 'done') return 'wake'
   if (kind === 'question' && state === 'blocked') return 'wake'
   // §6 : une question dont l'etat ne justifie pas le reveil ne reveille pas,
@@ -175,26 +188,26 @@ export function wakePolicy(kind, state) {
  * Les kinds dont le reveil peut dependre de l'ARRET de l'emetteur.
  *
  * Un 'avancement' ou une 'decouverte' n'attend rien : il se livre par injection
- * et ne reveille jamais. Une 'question' et un 'resultat', eux, n'ont de sens
- * qu'une fois l'emetteur arrete — c'est pourquoi leur reveil se decide la, et
- * pas au depot.
+ * et ne reveille JAMAIS. Une 'question', un 'resultat' et un 'echec', eux,
+ * n'ont de sens qu'une fois l'emetteur arrete — c'est pourquoi leur reveil se
+ * decide la, et pas au depot.
  */
-export const WAKE_KINDS = ['question', 'resultat']
+export const WAKE_KINDS = ['question', 'resultat', 'echec']
 
 /**
  * Le message est-il eligible a un reveil DIFFERE ?
  *
- * Eligible veut dire : sa depose ne decide rien, et le reveil sera re-evalue a
- * l'arret de l'emetteur. Un kind qui demande ('question', 'resultat'), ou un
- * emetteur dont le dernier resultat d'outil est en erreur — l'echec ne se
- * declare pas, il se constate (CANAL §3).
+ * L'eligibilite depend du KIND SEUL, jamais de l'etat. C'est ce qui rend le
+ * battement de coeur abordable : un 'avancement' ne reveille personne, MEME si
+ * le dernier resultat d'outil de l'emetteur est en erreur (l'etat reste une
+ * annotation, il ne promeut pas un kind). Un echec qui doit reveiller se
+ * DECLARE, avec le kind 'echec' — il ne s'obtient pas en glissant un etat.
  *
  * @param kind - le kind DECLARE.
- * @param state - l'etat DERIVE au moment du depot.
  * @returns vrai si le message doit porter 'wake_pending'.
  */
-export function isWakeEligible(kind, state) {
-  return state === 'failed' || WAKE_KINDS.includes(kind)
+export function isWakeEligible(kind) {
+  return WAKE_KINDS.includes(kind)
 }
 
 /**
@@ -503,10 +516,23 @@ export function liveRootOf(agents, id, maxHops = 16) {
   return current
 }
 
-/** Le prochain '<de>:<seq>' de cet emetteur, seq strictement croissant. */
-export function nextId(from, entries) {
+/**
+ * Le prochain id de cet emetteur dans CE magasin, seq strictement croissant.
+ *
+ * L'identite est `<de>:<seq>` — mais elle n'est unique que DANS le magasin ou on
+ * la lit, et un emetteur peut ecrire dans deux magasins ('root' de la voie du
+ * service interne). Dans ce cas seulement, l'id est qualifie par la racine :
+ * `<racine>:<de>:<seq>`. Sans cela, deux messages distincts porteraient la meme
+ * chaine dans deux fichiers, et un journal ne pourrait plus les distinguer.
+ *
+ * @param from - l'emetteur.
+ * @param entries - les enveloppes DEJA presentes dans le magasin cible.
+ * @param qualifier - la racine, quand le magasin n'est pas celui de l'emetteur.
+ * @returns l'identite du prochain message.
+ */
+export function nextId(from, entries, qualifier = null) {
   let max = 0
-  const prefix = from + ':'
+  const prefix = (qualifier === null ? '' : qualifier + ':') + from + ':'
   for (const row of entries) {
     if (typeof row?.id !== 'string' || !row.id.startsWith(prefix)) continue
     const seq = Number.parseInt(row.id.slice(prefix.length), 10)
@@ -567,16 +593,28 @@ export function createChannel(deps = {}) {
    */
   const pending = new Map()
 
+  /**
+   * La cle d'une attente inclut la RACINE : `<de>` -> `<magasin>\u0000<id>`.
+   *
+   * '<de>:<seq>' n'est unique que dans un magasin ; indexer sur (de, id) faisait
+   * donc disparaitre un message quand le meme emetteur en deposait un dans deux
+   * magasins avec le meme id (mesure : le second ecrasait le premier, et le
+   * message du magasin propre n'etait plus jamais decide). La racine fait partie
+   * de l'identite de l'attente, exactement comme elle fait partie de celle du
+   * message.
+   */
+  const pendingKey = (root, id) => String(root) + '\u0000' + String(id)
+
   function markPending(from, id, root) {
     let mine = pending.get(from)
     if (mine === undefined) pending.set(from, (mine = new Map()))
-    mine.set(id, root)
+    mine.set(pendingKey(root, id), { id, root })
   }
 
-  function forgetPending(from, id) {
+  function forgetPending(from, id, root) {
     const mine = pending.get(from)
     if (mine === undefined) return
-    mine.delete(id)
+    mine.delete(pendingKey(root, id))
     if (mine.size === 0) pending.delete(from)
   }
 
@@ -654,10 +692,15 @@ export function createChannel(deps = {}) {
     if (!KINDS.includes(kind)) {
       throw new Error('channel: kind must be one of ' + KINDS.join(' | ') + ', got ' + JSON.stringify(kind))
     }
-    const root = typeof input.root === 'string' && input.root !== '' ? input.root : (rootOf(from) ?? from)
+    const own = rootOf(from) ?? from
+    const root = typeof input.root === 'string' && input.root !== '' ? input.root : own
     const store = storeFor(root)
     const entries = store.load()
-    const id = typeof input.id === 'string' && input.id !== '' ? input.id : nextId(from, entries)
+    // L'id n'est qualifie par la racine que dans le seul cas ou l'identite locale
+    // ne suffit plus : un depot dans un magasin qui n'est pas celui de l'emetteur.
+    const id = typeof input.id === 'string' && input.id !== ''
+      ? input.id
+      : nextId(from, entries, root === own ? null : root)
     const clipped = clipSummary(input.summary)
     const state = deriveState({ kind, ...(input.facts ?? factsOf(from, kind)) })
     const payloadRef = normalisePayloadRef(input.payloadRef)
@@ -665,7 +708,7 @@ export function createChannel(deps = {}) {
     // ('to'). L'adressage est une propriete du message, donc la lecture peut le
     // controler (un enfant ne lit que ce qui lui est adresse).
     const to = typeof input.to === 'string' && input.to !== '' ? input.to : root
-    const eligible = to !== from && isWakeEligible(kind, state)
+    const eligible = to !== from && isWakeEligible(kind)
     const envelope = {
       id,
       from,
@@ -753,19 +796,19 @@ export function createChannel(deps = {}) {
     let evaluated = 0
     let sent = 0
     let refused = 0
-    for (const [id, root] of [...mine]) {
+    for (const { id, root } of [...mine.values()]) {
       const store = storeFor(root)
       const row = store.load().find((entry) => entry.id === id)
       if (row === undefined || row.wake_pending !== true) {
         // Evince par la borne par emetteur, ou deja consomme ailleurs.
-        forgetPending(from, id)
+        forgetPending(from, id, root)
         continue
       }
       const policy = wakePolicy(row.kind, state)
       if (policy === 'inject') continue
       // Idempotence : consomme ici veut dire jamais re-evalue.
       evaluated++
-      forgetPending(from, id)
+      forgetPending(from, id, root)
       let wake = 'refused'
       if (policy === 'wake') {
         const owner = agents?.get?.(row.to)
@@ -863,7 +906,42 @@ export function createChannel(deps = {}) {
     storeFor,
     markersFor,
     limiter,
+    journal,
   }
+}
+
+/**
+ * Ne garde que les cles DECLAREES d'un appel d'outil, et journalise les autres.
+ *
+ * POURQUOI ICI, ET PAS DANS LE SCHEMA. Le harnais passe 'exec.arguments' tel quel
+ * au corps de l'outil ('dsh-tools/lib/index.js:3310') et ne rejette une cle non
+ * declaree que si le schema porte 'additionalProperties: false' ('dsh-tools'
+ * :467-468). Fermer le schema casserait le tour d'un agent qui hallucine un
+ * argument ; le filtrer ici rend l'argument SANS EFFET et le dit au journal.
+ *
+ * @param channel - le canal, pour le journal.
+ * @param tool - le nom de l'outil, journalise tel quel.
+ * @param args - les arguments recus, tels quels.
+ * @param allowed - les seules cles que le corps a le droit de lire.
+ * @returns les arguments declares, et eux seuls.
+ */
+export function declaredArguments(channel, tool, args, allowed) {
+  const kept = {}
+  const undeclared = []
+  const source = args !== null && typeof args === 'object' ? args : {}
+  for (const [key, value] of Object.entries(source)) {
+    if (allowed.includes(key)) kept[key] = value
+    else undeclared.push(key)
+  }
+  if (undeclared.length > 0) {
+    // Journalise, jamais fatal : le tour de l'appelant continue.
+    try {
+      channel?.journal?.({ step: 'undeclared-argument', tool, keys: undeclared })
+    } catch {
+      // Un diagnostic qui casse ce qu'il observe est pire que pas de diagnostic.
+    }
+  }
+  return kept
 }
 
 /** Les deux outils du canal, construits sur un canal. */
@@ -872,15 +950,17 @@ export function buildTools(channel) {
     {
       name: 'channel_post',
       description: 'Poste une enveloppe structuree sur le canal de retour vers le proprietaire de ton arbre. '
-        + 'Le kind est DECLARE (decouverte | avancement | question | resultat) ; l etat est DERIVE par le runtime. '
-        + 'Le resume est borne a 2000 caracteres et tronque visiblement. Ne joins JAMAIS la charge utile : '
-        + 'payloadRef est un CHEMIN que le proprietaire tirera s il le veut. Un avancement ne reveille personne ; '
-        + 'une question ou un resultat ne reveille PAS au depot — tu travailles encore — mais a ton ARRET, quand '
-        + 'ton tour se ferme : la reponse rendue vaut wake=pending, et le reveil se decide la. Rend l id du message.',
+        + 'Le kind est DECLARE (decouverte | avancement | question | resultat | echec) ; l etat est DERIVE par le '
+        + 'runtime. Le resume est borne a 2000 caracteres et tronque visiblement. Ne joins JAMAIS la charge utile : '
+        + 'payloadRef est un CHEMIN que le proprietaire tirera s il le veut. Un avancement ou une decouverte ne '
+        + 'reveille JAMAIS — meme si ton dernier outil a echoue : pour reveiller, declare le kind echec. Une question, '
+        + 'un resultat ou un echec ne reveille PAS au depot — tu travailles encore — mais a ton ARRET, quand ton tour '
+        + 'se ferme : la reponse rendue vaut wake=pending, et le reveil se decide la. Les seuls arguments lus sont '
+        + 'kind, summary, target, revision, verdict, payloadRef ; tout autre est ignore et journalise. Rend l id.',
       parameters: {
         type: 'object',
         properties: {
-          kind: { type: 'string', enum: KINDS, description: 'Ce que tu declares : decouverte | avancement | question | resultat.' },
+          kind: { type: 'string', enum: KINDS, description: 'Ce que tu declares : decouverte | avancement | question | resultat | echec.' },
           summary: { type: 'string', description: 'Texte court (2000 caracteres au plus, troncature visible au-dela).' },
           target: { type: 'string', description: 'La cible du verdict (chemin, artefact, session).' },
           revision: { type: 'string', description: 'La revision visee (commit, hash, version).' },
@@ -894,7 +974,7 @@ export function buildTools(channel) {
           type: 'object',
           additionalProperties: false,
           properties: {
-            id: { type: 'string', description: 'Id du message : <session>:<seq>.' },
+            id: { type: 'string', description: 'Id du message : <session>:<seq> dans ton arbre.' },
             state: { type: 'string', description: 'Etat DERIVE par le runtime.' },
             duplicate: { type: 'boolean', description: 'Vrai si cet id etait deja stocke.' },
             wake: { type: 'string', description: 'Verdict du depot : pending (reveil differe a ton arret) | injected | no-owner | self.' },
@@ -908,7 +988,9 @@ export function buildTools(channel) {
         if (typeof from !== 'string' || from === '') {
           throw new Error('channel_post: aucune session appelante — le message ne peut pas etre adresse.')
         }
-        return channel.post({ ...args, from })
+        // Le corps ne lit QUE les cles declarees : 'to' et 'root' ne sont pas de
+        // la surface, et une cle hallucinee n'a aucun effet.
+        return channel.post({ ...declaredArguments(channel, 'channel_post', args, POST_ARGUMENTS), from })
       },
     },
     {
@@ -918,7 +1000,8 @@ export function buildTools(channel) {
         + 'l arbre obtient donc une page vide — la lecture est refusee, comptee, et ne marque RIEN comme lu. Rend '
         + 'au plus 10 enveloppes, les plus recentes, et les marque lues. Chaque enveloppe porte l id, l emetteur, '
         + 'le kind declare, l etat derive, la cible et la revision du verdict, le resume borne, le CHEMIN de la '
-        + 'charge utile et sa taille. Le contenu n est jamais transporte : ouvre payloadRef toi-meme.',
+        + 'charge utile et sa taille. Le contenu n est jamais transporte : ouvre payloadRef toi-meme. Les seuls '
+        + 'arguments lus sont since, kinds et only_unread ; tout autre est ignore et journalise.',
       parameters: {
         type: 'object',
         properties: {
@@ -943,7 +1026,9 @@ export function buildTools(channel) {
         if (typeof from !== 'string' || from === '') {
           throw new Error('channel_read: aucune session appelante.')
         }
-        const envelopes = channel.read({ ...args, from })
+        // Meme frontiere : 'root' ne redirige pas la lecture, et 'from' ne fait
+        // pas lire a la place d'un autre — le controle de destinataire tient.
+        const envelopes = channel.read({ ...declaredArguments(channel, 'channel_read', args, READ_ARGUMENTS), from })
         return { count: envelopes.length, envelopes }
       },
     },
@@ -958,6 +1043,10 @@ export function buildTools(channel) {
  * composee d'un agent (mesure deux fois, voir
  * 'packages/boost-mode/cordis.patch.yml:369-384'). Le motif qui fonctionne est
  * celui de 'packages/detached-jobs/lib/index.js:985-1026'.
+ *
+ * Ce motif-la tient a la PORTEE DE L'ENREGISTREMENT ; la livraison des arrets, elle,
+ * tient au TAG DE PORTEE — deux mecanismes distincts, mesures par deux probes
+ * distincts ('probe-mount.mjs' et 'probe-stop.mjs', section 5).
  */
 export function apply(ctx, config = {}) {
   const agents = ctx.agents
@@ -1043,6 +1132,19 @@ export function apply(ctx, config = {}) {
   //     l'etat derive est 'done' — le seul arret ou un 'resultat' du §4 se decide.
   // 'turn/end' est indispensable : un enfant bloque n'est jamais dispose, et
   // 'agent/disposed' seul rendrait la ligne 'question' + 'blocked' inatteignable.
+  //
+  // CE QUI DECIDE DE LA LIVRAISON N'EST PAS LE NIVEAU DE MONTAGE, MAIS LE TAG DE
+  // PORTEE. Correction d'une affirmation fausse de la passe precedente : un
+  // listener SANS tag est admis partout, et un listener TAGUE n'est admis que si
+  // son tag est sur la chaine de la cle du porteur —
+  // 'scopeTarget' ('dsh-scope/lib/index.js:327-337') admet tout contexte sans tag,
+  // puis remonte 'scopeParents' depuis la cle. Le porteur du feed de session est
+  // 'scopeTarget(session, scopeOf(this.ctx))' ('dsh-session/lib/index.js:1736'),
+  // dont la cle est la portee du MAGASIN — aucune quand le magasin est a la
+  // racine : un listener tague n'y est donc jamais admis (mesure : 2 contre 0).
+  // Une LIGNE HOTE a la racine reste la bonne configuration (elle seule voit
+  // 'agents' et tous les agents), mais la raison n'est pas un « niveau » : c'est
+  // qu'une ligne montee dans une portee de preset est TAGUEE, et perd le feed.
   ctx.on('session/event', (session, event) => {
     if (event?.type !== 'turn/end') return
     settle(session?.id, 'turn/end')
