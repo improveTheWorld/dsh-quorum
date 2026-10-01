@@ -16,5 +16,14 @@
 #
 # Le fichier du preset n'est pas dans le perimetre de ce paquet.
 - insert:
+    # SEPTIEME LIGNE, DESARMEE le 2026-10-01 apres deux falsifications successives.
+    # La mesure d'occupation a ete refutee sur la vraie pile : `prefix-usage` s'arrete au dernier
+    # echantillon du fournisseur (donc AVANT les tool/result du tour clos) et la vue de surface est
+    # detruite par une compaction post-frontiere — les deux vues tombent ensemble, un fork refuse a
+    # 75 % passe, et l'enfant herite exactement ces 75 %. Mesure inverse aussi : 70 000 annonces pour
+    # 5 tokens de surface close. La mesure doit se lire sur les EVENEMENTS du prefixe que le fork
+    # tranche, pas sur une projection. En attendant : la ligne est desarmee, et les 30 cas restent
+    # en place pour la reprise (docs/DECISIONS.md, choix n°9).
     - id: dsh-boost-context-budget
+      disabled: true
       name: ./lib/index.js
