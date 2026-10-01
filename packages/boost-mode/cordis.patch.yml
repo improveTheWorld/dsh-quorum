@@ -142,27 +142,25 @@
               compaction: true
               toolResultPruner: true
             config:
-              # Seuil de compaction automatique, mesuré et non deviné.
+              # Seuil de compaction automatique — 85 % de la fenetre, POUR LE COUT.
               #
-              # Le token-meter estime à 4 caractères/token et sous-évalue le
-              # contenu dense (code, JSON, sorties PTC). Relevé sur les 5 seuls
-              # déclenchements automatiques des journaux de session : le prompt
-              # réel au moment du déclenchement valait 0,999× l'estimation sur de
-              # la prose et 1,168× sur du code — moyenne 1,10.
+              # Decision de l'utilisateur, 1er octobre : ses sessions sont devenues couteuses et le
+              # taux bas y contribue. La valeur vit dans les DEUX fichiers a l'identique — l'agregateur
+              # est la copie vivante, le sous-paquet en est la source — et le test anti-derive l'exige.
               #
-              # Défaut 0,8 : min(1e6 × 0,8 ; 1e6 − 256k de sortie réservée − 64k
-              # de marge) = 678 464 estimés, donc jusqu'à ~790 000 réels sur du
-              # code, soit 79 % de la fenêtre. Mesuré : l'agent avait déjà
-              # décroché à ce niveau (une session a répondu en chinois à 792 000).
+              # Le seuil N'EST PAS W x thresholdRatio : floor(min(W x ratio, W - O - headroomTokens)).
+              # Avec O = 256 000 de sortie reservee et headroomTokens 0, un 0,85 seul plafonnerait a
+              # 744 000 ; c'est maxTokens 32768 qui empeche le resume de tomber a zero a marge nulle.
               #
-              # 0,5 → 500 000 estimés ≈ 550 000 réels, la cible voulue. Ne pas
-              # toucher au maxTokens de la route : le baisser relèverait le seuil.
-              # Coût : une compaction est un appel modèle de plus, attendu dans le
-              # step ; plus le seuil est bas, plus souvent cette pause est payée.
+              # RESERVE NON LEVEE : une session a decroche a 792 000 (79 % de la fenetre) sous l'ancien
+              # reglage 0,8 — donc SOUS la cible de 85 %. Si une longue session derive, c'est le premier
+              # suspect, et une mesure trancherait : rejouer une session longue en regardant le seuil.
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
                 config:
-                  thresholdRatio: 0.5
+                  thresholdRatio: 0.85
+                  headroomTokens: 0
+                  maxTokens: 32768
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
               - id: tool-result-pruner
