@@ -1,7 +1,9 @@
 # Passation — mode Boost DSH
 
 Document autoportant. Il est écrit pour une session qui **n'a aucun souvenir** de celle qui l'a
-précédé. Lis-le en entier avant d'agir, puis applique la procédure de coupure du §11 : c'est elle qui met le dépôt consolidé et le profil vivant d'accord.
+précédé. Lis-le en entier avant d'agir. La bascule du profil vivant sur le dépôt consolidé (§11) est
+**faite** — vérifiée le 2026-10-02 : aucun `patch: entry … not found`, les **huit** ids du mode à 1 ;
+le §11 garde la procédure, datée, pour un profil neuf ou une reprise.
 
 Les règles de méthode permanentes sont chargées automatiquement depuis `~/.dsh/AGENTS.md` (dix règles :
 le fond jamais le pansement, des tests toujours, instrumenter avant de conclure, revérifier l'état sur
@@ -23,18 +25,18 @@ mesurées et corrigées (§3).
 
 | Élément | État | Preuve |
 |---|---|---|
-| Preset `preset-boost` (mode Boost) | actif | 1700 lignes composées, `Config.listConfigs` |
+| Preset `preset-boost` (mode Boost) | actif | composition mesurée le 2026-10-02 : **1834** lignes (profil `web`), **1785** (`boost-test`), huit ids du mode une fois chacun |
 | `@local/dsh-boost-relay` — relais des jobs d'enfants | **fonctionne**, 14 tests verts | une session Boost a reçu l'avis de teardown de `pwsh-7`, résolution par en-têtes durables comprise ; `node --test test/notice.test.mjs` (5 cas) et `test/journal.test.mjs` (9 cas) |
 | Journal du relais | **borné et sans bruit** — commité `8873f5f` | les événements `output`/`progress` ne sont plus tracés : ils faisaient **50,8 %** d'un fichier de 43 Mio qui grandissait sans borne ; rotation à 8 Mio, disque plafonné à 16 Mio. A/B **sur le vrai registre de jobs**, 82 abonnements montés : avis **identiques au byte près** (4 = 4, même texte, même ordre, même canal) pendant que le journal passe de **1895 à 107 enregistrements**. Les chiffres 94 → 19 du premier tour n'étaient pas reproductibles faute de fixture versionnée ; ceux-ci le sont |
 | Filtre d'abonnement du relais | **corrigé** — mesuré, pas supposé | le plugin souscrivait `{ owners: { owner } }`, forme **absente** de l'union `JobEventFilter` (`dsh-jobs/lib/types/types.d.ts:211-222`), alors que le hub ne filtre que sur `owner` **singulier** (`dsh-jobs-local/lib/index.js:75`) : **82 abonnements** par process, 82 enregistrements identiques pour un seul règlement, 78 770 lignes `skip` pour 1 924 règlements. Le global `{ owners: 'all' }` est **conservé** : `ctx.agents.list()` a rendu `[]` à l'installation dans un process où trois agents vivaient, donc un propriétaire jamais énuméré serait invisible |
 | `@local/dsh-detached-jobs` — `run_detached` | **actif et vérifié** | un job lancé par un worker a survécu (`cause=producer` 40,3 s plus tard, **aucun** `teardown`) et la racine a lu `DETACHED-OK` — §5, test 2 |
 | Outillage d'analyse (`tools/`) | 22 tests unitaires verts | `node --test tools/tests.test.mjs` |
 | Résolution de propriété (`rootOf`) | 10 tests unitaires verts | `node --test test/root.test.mjs` |
-| Activation (`apply`, contexte strict) | 15 tests unitaires verts, dont la racine du texte rendu, la source muette et le `pwshPath` configuré | `node --test test/apply.test.mjs` |
+| Activation (`apply`, contexte strict) | 19 tests unitaires verts, dont la racine du texte rendu, la source muette et le `pwshPath` configuré | `node --test test/apply.test.mjs` |
 | Résolution du shell du producteur | 8 tests unitaires verts, dont un spawn réel | `node --test test/shell.test.mjs` |
 | Déversement, annonce et livraison unique (`spill`) | 9 tests unitaires verts | `node --test test/spill.test.mjs` |
 | Purge du store (`purge`) | 10 tests unitaires verts | `node --test test/purge.test.mjs` |
-| Suite complète | **52 tests verts** | `node --test` — sans argument, cwd du projet (`node --test test/` échoue en MODULE_NOT_FOUND) |
+| Suite complète du paquet | **56 tests verts** (10 + 19 + 8 + 9 + 10) | `node --test` — sans argument, cwd du paquet (`node --test test/` échoue en MODULE_NOT_FOUND) |
 | Annonce par le vrai registre | sonde verte, contrôle négatif rouge (exit 1) | `node tools/probe-spill-announce.mjs` |
 | Résolution par la jonction du profil | sonde verte | `node tools/probe-profile-import.mjs` |
 
@@ -120,6 +122,11 @@ lisait que le fichier **courant**, où ces motifs sont à **0** : elle n'y renda
 pour 8 `apply-complete`** : un démarrage a échoué (`apply-failed`, pid 22180, « cannot get property
 "agents" without inject » — la cause n°3 du §3). La lecture se fait donc par **`pid`**, jamais par « le
 dernier du fichier ».
+
+**Re-mesure du 2026-10-02 — la rotation n'est pas « un fichier par démarrage ».** Le fichier **courant**
+(1,2 Mio) porte les deux derniers montages (`{"at":"2026-10-02T14:44:28.617Z","step":"mount","first":true,"pid":13336}`
+et `{"at":"2026-10-02T17:02:08.688Z",…,"pid":11552}`), et `.1` (48,3 Mio) s'arrête au 30/09 : chercher
+**par `pid` dans `decisions.jsonl*`**, jamais « le dernier du fichier ».
 
 Recette corrigée — elle ne dépend d'aucun fichier courant :
 
@@ -208,7 +215,7 @@ deux commandes doivent rendre ce qui suit. Elles ne modifient rien.
 
 ```
 cd C:\CodeSource\dsh-boost\packages\detached-jobs
-node --test                                  # attendu : 52/52 (sans argument !)
+node --test                                  # attendu : 56/56 (sans argument !)
 node tools/probe-spill-announce.mjs          # attendu : PROBE-PASS, spillPaths non vide, exit 0
 ```
 
@@ -245,34 +252,39 @@ Si un jour il fallait déclarer une ligne dans ce patch, la seule forme qui cré
 ## 7. Inventaire
 
 **Dépôt consolidé `C:\CodeSource\dsh-boost`** (git, commit initial `652ef83`) — c'est lui qui porte le
-livrable. Les cinq dépôts d'origine ne sont plus que des cibles de `link:` tant que le profil n'a pas été
-repointé (§11).
+livrable. Les cinq dépôts d'origine n'y sont **plus référencés** depuis la coupure du profil du
+2026-10-01 (§11) : le `package.json` du profil ne porte plus que `@local/dsh-boost` et
+`@local/dsh-auto-update`, et il ne subsiste que quatre jonctions **inertes** dans
+`profiles\web\node_modules\@local\`.
 
 | Chemin | Rôle |
 |---|---|
-| `package.json` (racine) | **le livrable** : `@local/dsh-boost`, `dsh.bundle.patch: ./cordis.patch.yml`, cinq dépendances `file:packages/<paquet>` |
-| `cordis.patch.yml` (racine) | **UNE** entrée `insert:` portant les cinq lignes, recopiées des cinq patches d'origine |
+| `package.json` (racine) | **le livrable** : `@local/dsh-boost`, `dsh.bundle.patch: ./cordis.patch.yml`, **huit** dépendances `file:packages/<paquet>` (les **cinq** paquets d'origine + les **trois** ajouts) |
+| `cordis.patch.yml` (racine) | **UNE** entrée `insert:` portant les **huit** lignes — les **cinq** paquets d'origine y sont recopiés depuis leurs cinq patches (mêmes `id`/`name`/`config`), suivis des **trois** ajouts (`boost-channel`, `boost-context-budget`, `boost-lessons`) |
 | `index.js` | entry point du bundle — aucune API runtime |
-| `test/aggregate.test.mjs` | le test anti-dérive (4 cas) : ids, `config` en JSON canonique, `name` résolvant vers le même module, aucun id dupliqué |
+| `test/aggregate.test.mjs` | le test anti-dérive (5 cas) : ids, `config` en JSON canonique, `name` résolvant vers le même module, aucun id dupliqué |
 | `docs/HANDOVER.md` | **ce document — l'état fait foi ici** |
 | `docs/PLAN.md` | **document historique** : conception, jalons M0-M5, copie du patch qui a divergé, affirmations périmées marquées comme telles |
 | `docs/PROTOCOL.md` | protocole des trois phases + prompt de mission de torture + recevabilité d'une preuve |
-| `tools/` | **onze** fichiers (relevé du 2026-09-30) : `session-log.mjs` (décodage zstd multi-frame), `parse.mjs` (helpers purs, testés), `boost-report.mjs` (rapport de run), `audit.mjs` (contrôles de santé), `protocol.mjs` (notation du protocole), `integrity.mjs` (a-t-on lu l'interdit), `find-text.mjs` (où vit une chaîne), `check-notices.mjs` (le père a-t-il entendu ses fils), `diagnose-frames.mjs` (trame zstd sur disque), `dump-records.mjs` (types et formes d'enregistrements), `tests.test.mjs` (22 cas). `find-clock.mjs` a été **retiré du dépôt** pendant la passe du 2026-09-30 (`git status` : ` D tools/find-clock.mjs`) — ne pas le chercher |
+| `tools/` | **douze** fichiers (relevé du 2026-10-02) : `session-log.mjs` (décodage zstd multi-frame), `parse.mjs` (helpers purs, testés), `boost-report.mjs` (rapport de run), `audit.mjs` (contrôles de santé), `protocol.mjs` (notation du protocole), `integrity.mjs` (a-t-on lu l'interdit), `find-text.mjs` (où vit une chaîne), `check-notices.mjs` (le père a-t-il entendu ses fils), `diagnose-frames.mjs` (trame zstd sur disque), `dump-records.mjs` (types et formes d'enregistrements), `tests.test.mjs` (22 cas), `cutover-profile.ps1` (la coupure du profil en une passe, lecture seule par défaut, `-Apply` pour écrire ; il vérifie **six** ids, ceux de la composition du 2026-10-01). `find-clock.mjs` a été **retiré du dépôt** pendant la passe du 2026-09-30 (`git status` : ` D tools/find-clock.mjs`) — ne pas le chercher |
 | `packages/boost-mode/` | `preset-boost` (`@local/dsh-boost-mode`) : `cordis.patch.yml` (persona orchestrateur + trois rôles + leurs `toolFilter`), `lib/index.js`, `README.md` — **aucune suite de tests** |
 | `packages/boost-relay/` | `boost-job-relay` (`@local/dsh-boost-relay`) : `lib/index.js`, `test/notice.test.mjs` (5), `test/journal.test.mjs` (9), `README.md` — **fonctionne** |
 | `packages/boost-status/` | `boost-status-command` (`@local/dsh-boost-status`) : commande `/boost-status`, `test/status.test.mjs` (10) — active |
-| `packages/detached-jobs/` | `dsh-detached-jobs` (`@local/dsh-detached-jobs`) : `lib/index.js`, `test/root.test.mjs` (10, propriété), `test/apply.test.mjs` (15, activation en contexte strict), `test/shell.test.mjs` (8, résolution du shell), `test/spill.test.mjs` (9, déversement et livraison unique), `test/purge.test.mjs` (10, purge du store), `tools/probe-profile-import.mjs` (résolution par la jonction), `tools/probe-spill-announce.mjs` (annonce par le vrai registre) — **actif et vérifié** |
+| `packages/detached-jobs/` | `dsh-detached-jobs` (`@local/dsh-detached-jobs`) : `lib/index.js`, `test/root.test.mjs` (10, propriété), `test/apply.test.mjs` (19, activation en contexte strict), `test/shell.test.mjs` (8, résolution du shell), `test/spill.test.mjs` (9, déversement et livraison unique), `test/purge.test.mjs` (10, purge du store), `tools/probe-profile-import.mjs` (résolution par la jonction), `tools/probe-spill-announce.mjs` (annonce par le vrai registre) — **actif et vérifié** |
 | `packages/guard-surrogate/` | `dsh-guard-surrogate` (`@local/dsh-guard-surrogate`) : `lib/index.js`, `lib/walker.js`, `test/guard.test.mjs` (26), `README.md` — répare les surrogates isolés sur `tools/post-execute` (§10) |
+| `packages/boost-channel/` | `dsh-boost-channel` (`@local/dsh-boost-channel`) : canal de retour enfant → propriétaire de l'arbre — `channel_post` / `channel_read` / `channel_subscribe`, enveloppe structurée, `state` dérivé, budget de livraison à deux bourses ; `test/channel.test.mjs` (52), `tools/probe-mount.mjs`, `tools/probe-stop.mjs` — **actif** (ses trois outils sont dans la surface de cette session) |
+| `packages/boost-context-budget/` | `dsh-boost-context-budget` (`@local/dsh-boost-context-budget`) : `context_occupancy` et la garde du fork (`subagent_fork` refusé au-delà du seuil) ; `test/context-budget.test.mjs` (32), `tools/probe-fork-guard.mjs` — **actif** (`context_occupancy` est dans la surface de cette session) |
+| `packages/boost-lessons/` | `dsh-boost-lessons` (`@local/dsh-boost-lessons`) : listener `session/event` qui **journalise** les compactions de racine — aucun appel de modèle, aucun enfant, **aucune surface d'outil** (ne pas le chercher dans un inventaire d'outils) ; `test/lessons.test.mjs` (14), `tools/probe-lessons.mjs` — monté, sans outil |
 
 **Hors du dépôt, mais sur le chemin critique** :
 
 | Chemin | Rôle |
 |---|---|
-| `C:\Users\bilel\.dsh\profiles\web\package.json` | **le profil réel** : cinq `link:` vers les cinq **dépôts d'origine** (pas vers le dépôt consolidé — c'est ce que règle le §11), plus `@local/dsh-auto-update` |
-| `C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml` | patch du profil : configuration de lignes **existantes** — une entrée sans `insert:` ne crée rien. Les trois entrées mortes `time-context` / `schedule` / `ui-schedule` sont aux **lignes 61-66** (§11) |
-| `C:\Users\bilel\.dsh\profiles\boost-test\` | le profil de recette : `"@local/dsh-boost": "link:C:/CodeSource/dsh-boost"`, jonction `node_modules\@local\dsh-boost`, et les cinq ids dans `--dump-config` |
+| `C:\Users\bilel\.dsh\profiles\web\package.json` | **le profil réel**, **coupé le 2026-10-01** (§11) : `"@local/dsh-boost": "link:C:/CodeSource/dsh-boost"` et `@local/dsh-auto-update`, rien d'autre ; `dsh.profile.bundles` porte `@local/dsh-boost` **et** `@deepseek-ai/dsh-experimental-schedule-bundle`, aucun sous-paquet. Sauvegarde de l'avant : `package.json.20261001-015721.bak`, qui portait **quatre** `link:` vers les dépôts d'origine (mesuré) |
+| `C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml` | patch du profil : configuration de lignes **existantes** — une entrée sans `insert:` ne crée rien. Les trois entrées mortes `time-context` / `schedule` / `ui-schedule` étaient aux **lignes 61-66** de la version d'avant (`cordis.patch.yml.20261001-015721.bak`) ; elles ont été **purgées** le 2026-10-01 — mesuré le 2026-10-02 : plus aucune occurrence dans le fichier, et `--dump-config` ne rend **aucun** `patch: entry … not found` |
+| `C:\Users\bilel\.dsh\profiles\boost-test\` | le profil de recette : `"@local/dsh-boost": "link:C:/CodeSource/dsh-boost"`, jonction `node_modules\@local\dsh-boost`, et les **huit** ids dans `--dump-config` — **1785** lignes, mesuré le 2026-10-02 |
 | `C:\Users\bilel\.dsh\profiles\local-plugins\dsh-auto-update\` | `@local/dsh-auto-update` — **bundle de profil, hors de ce dépôt** : outil `harness_update` (`status`/`check`/`apply`/`migrate`), commande `/update`, notification de version dans le prompt, `lib/*.js`, `install.ps1`, `test/selftest.mjs` |
-| `C:\Users\bilel\.dsh\plugin-data\dsh-boost-relay\decisions.jsonl` (+ `.1`) | journal de décisions des **deux** plugins, **avec rotation** — les enregistrements de cycle de vie du process vivant sont dans `.1` (§4.A) |
+| `C:\Users\bilel\.dsh\plugin-data\dsh-boost-relay\decisions.jsonl` (+ `.1`) | journal de décisions des **deux** plugins, **avec rotation** — mesuré le 2026-10-02 : `.1` fait 48,3 Mio et s'arrête au 30/09, le **courant** (1,2 Mio) porte les montages du jour. La rotation n'est donc pas « un fichier par démarrage » : lire **les deux** et chercher **par `pid`** (§4.A) |
 | `C:\CodeSource\boost-torture-archive\` | campagnes 1 et 2, **contaminées** — archives uniquement |
 
 ## 8. Faits du harnais à ne pas redécouvrir
@@ -362,8 +374,11 @@ repointé (§11).
    l'ancien texte est remis, le cas neuf **échoue seul** (35 pass / 1 fail) — le test est donc
    discriminant.
 
-   **Deuxième passe du 30/09, écrite et vérifiée mais pas dans ce process vivant** — elle attend le
-   prochain démarrage, comme tout code de module. Cinq changements : le store est **purgé** au
+   **Deuxième passe du 30/09, écrite et vérifiée — état d'alors : pas dans le process vivant, en attente
+   du prochain démarrage.** Depuis, le process a redémarré : le relais trace un `mount` par process
+   (`first:true` — pid 4248 le 30/09, pid 13336 le 2026-10-02 à 14:44:28Z, pid 11552 à 17:02:08Z), et
+   `packages\detached-jobs\lib\index.js` sur disque date du 2026-10-01 00:42, donc **antérieur** au
+   dernier démarrage. Cinq changements : le store est **purgé** au
    démarrage de chaque job (TTL 7 j, plafond 20 fichiers, plancher d'âge 1 h, le fichier du job courant
    épargné) ; le nom du fichier porte un **jeton aléatoire** (`pwsh-1-a8f2e0.log`), parce que les ids
    sont un compteur de process et qu'un nouveau `pwsh-1` tronquait le fichier qu'un ancien journal
@@ -371,7 +386,7 @@ repointé (§11).
    le chemin par le registre** — `full output: (unavailable)` devient le chemin, prouvé sur le **vrai**
    `LocalJobRegistry` monté dans un process neuf, avec un contrôle négatif qui rend `spillPaths: []` et
    sort en 1 ; un `pwshPath` **configuré** est désormais suivi (inject différé, repli explicite et
-   tracé) ; le texte rendu distingue la racine du worker. Suite : **52/52**. Limites restantes, écrites
+   tracé) ; le texte rendu distingue la racine du worker. Suite : **52/52 au 2026-09-30**, **56** le 2026-10-02. Limites restantes, écrites
    dans le module : la purge ne tourne qu'au démarrage d'un job, et un fichier **plafonné** n'est jamais
    annoncé — il garde la tête, pas le flux.
 
@@ -502,15 +517,37 @@ session est une concaténation de frames zstd sans somme de contrôle embarquée
 seuls `skipped = 0` et `emptyTail = 0` sur 188 journaux soutiennent la moitié négative. C'est la limite du
 dossier, et elle se dit.
 
-## 11. Procédure de coupure — tout en UNE passe sur le profil, puis un redémarrage
+## 11. Procédure de coupure — **faite le 2026-10-01**, et la recette qui reste pour un profil neuf
 
-**Ce n'est plus « ce qui se fera au redémarrage » : c'est la procédure de bascule du profil vivant sur
-le dépôt consolidé.** État mesuré le 2026-09-30 : le disque porte **0.2.0-rc.2** (`dsh --version` ;
-`package.json` du harnais écrit le 30/09 à 17:29:06) et le process vivant **aussi** — `dsh web` est le pid
-**4248**, démarré à **20:17:31**, donc **après** l'installation ; le relais en a laissé la trace
-(`decisions.jsonl.1:677744`, `{"step":"mount","first":true,"pid":4248}`). Ce qui reste n'est donc **pas**
-une montée de version, mais quatre gestes : **repointer les liens**, **purger les trois entrées mortes**,
-**faire revenir `/schedule`**, **monter la garde**.
+**État mesuré le 2026-10-02 : la bascule du profil `web` sur le dépôt consolidé est FAITE.** Elle a été
+appliquée le **2026-10-01 à 01:57:21** par `tools/cutover-profile.ps1 -Apply` (commit `d72e83e`,
+« Coupure appliquée : profil repointé sur l'agrégateur, 0 avertissement »), sur sauvegardes horodatées
+`package.json.20261001-015721.bak` et `cordis.patch.yml.20261001-015721.bak`. Revérifié le 2026-10-02 :
+
+| Contrôle | Mesure du 2026-10-02 |
+|---|---|
+| `dependencies` du profil | `@local/dsh-boost` → `link:C:/CodeSource/dsh-boost`, plus `@local/dsh-auto-update` ; **aucun** `link:` vers un dépôt d'origine |
+| `dsh.profile.bundles` | `@local/dsh-boost` **et** `@deepseek-ai/dsh-experimental-schedule-bundle` ; aucun sous-paquet |
+| jonction | `profiles\web\node_modules\@local\dsh-boost` → `C:\CodeSource\dsh-boost` |
+| `dsh --profile web --dump-config` | **1834** lignes, **0** `not found`, les **huit** ids du mode à **1** (`boost-test` : **1785** lignes, huit ids à 1) |
+| process vivant | le relais trace le montage du pid **11552** (`{"at":"2026-10-02T17:02:08.688Z","step":"mount","first":true,"pid":11552}`), un process `node` démarré à 19:02:05 locale ; cette session porte `channel_post`/`channel_read`/`channel_subscribe`, `context_occupancy` et `run_detached` — la composition agrégée est donc bien celle qui tourne |
+
+**Ce que le process vivant ne porte pas encore, et c'est mesuré.** La **huitième** ligne
+(`boost-lessons`) a été ajoutée après ce démarrage : `cordis.patch.yml` (racine) est écrit à
+**19:18:56** et `packages\boost-lessons\lib\index.js` à **19:27:57**, tous deux postérieurs au montage de
+19:02:08 ; `dsh-hmr` ne surveille **pas** le patch d'un bundle (trois chemins seulement, paragraphe
+suivant), donc cette ligne est **composée sur le disque, pas montée dans ce process** — un redémarrage la
+fera vivre.
+
+**Historique — mesures d'époque (2026-09-30).** Le disque portait
+**0.2.0-rc.2** (`dsh --version` ; `package.json` du harnais écrit le 30/09 à 17:29:06) et le process
+vivant **aussi** — `dsh web` était le pid **4248**, démarré à **20:17:31**, donc **après**
+l'installation ; le relais en a laissé la trace (`decisions.jsonl.1:677744`,
+`{"step":"mount","first":true,"pid":4248}`). Ce qui restait alors n'était **pas** une montée de version,
+mais quatre gestes : **repointer les liens**, **purger les trois entrées mortes**, **faire revenir
+`/schedule`**, **monter la garde**. Les quatre ont été faits le 2026-10-01 ; les étapes ci-dessous gardent
+la recette — pour un profil neuf, une reprise, ou pour comprendre pourquoi l'ordre importe — avec les
+comptes d'aujourd'hui.
 
 **Pourquoi tout en UNE passe.** `dsh-hmr` ne surveille que **trois** chemins — `<profil>/package.json`,
 `<profil>/cordis.patch.yml` et `$DSH_HOME/cordis.patch.yml` (`dsh-hmr/lib/index.js:353-376`) — et compare
@@ -530,11 +567,13 @@ Pour toute commande `dsh plugin` ou `pnpm` de cette procédure :
 $env:PATH = 'C:\Program Files\nodejs\node_modules\corepack\shims;' + $env:PATH
 ```
 
-### Étape 1 — repointer les cinq liens, ou passer au seul agrégateur
+### Étape 1 — repointer les liens, ou passer au seul agrégateur — **forme A retenue le 2026-10-01**
 
 Deux formes, **jamais les deux** (l'exclusion mutuelle est expliquée dans le README racine) :
 
-**A. L'agrégateur seul (recommandé).** Une commande fait tout, avec le PATH de l'étape 0 :
+**A. L'agrégateur seul (recommandé, et c'est la forme en place).** Une commande fait tout, avec le PATH
+de l'étape 0 — sur un profil **déjà** coupé il n'y a plus rien à ajouter (la déclaration et la jonction y
+sont, mesuré plus haut) :
 
 ```powershell
 dsh plugin --profile web add C:\CodeSource\dsh-boost
@@ -542,33 +581,39 @@ dsh plugin --profile web add C:\CodeSource\dsh-boost
 
 Elle écrit `"@local/dsh-boost": "link:C:/CodeSource/dsh-boost"` dans `dependencies`, crée la jonction
 `profiles\web\node_modules\@local\dsh-boost` et ajoute le nom **en queue** de `dsh.profile.bundles`.
-**Elle ne retire rien** : il faut, dans la même passe, supprimer les cinq `link:` d'origine de
-`dependencies` **et** les noms correspondants de `dsh.profile.bundles` (`@local/dsh-boost-mode`,
-`@local/dsh-boost-status`, `@local/dsh-boost-relay`, `@local/dsh-detached-jobs`, et
-`@local/dsh-guard-surrogate` s'il y a été ajouté). Les garder *avec* l'agrégateur monterait chaque ligne
-**deux fois** (`dsh-app-boot/lib/index.js:87`).
+**Elle ne retire rien** : il faut, dans la même passe, supprimer les `link:` des paquets d'origine de
+`dependencies` **et** les noms correspondants de `dsh.profile.bundles`. La version d'avant la coupure en
+portait **quatre** (`@local/dsh-boost-mode`, `@local/dsh-boost-status`, `@local/dsh-boost-relay`,
+`@local/dsh-detached-jobs` — mesuré dans le `.bak` ; `@local/dsh-guard-surrogate` n'y a jamais été
+ajouté). Les garder *avec* l'agrégateur monterait chaque ligne **deux fois**
+(`dsh-app-boot/lib/index.js:87`).
 
-**B. Les cinq liens vers le dépôt consolidé.** Dans `profiles\web\package.json` :
+**B. Les liens vers le dépôt consolidé** — les **huit** sous-paquets : les **cinq** d'origine
+(`boost-mode`, `boost-relay`, `boost-status`, `detached-jobs`, `guard-surrogate`) et les **trois** ajouts
+(`boost-channel`, `boost-context-budget`, `boost-lessons`). Dans `profiles\web\package.json` :
 
 ```json
 "@local/dsh-boost-mode": "link:C:/CodeSource/dsh-boost/packages/boost-mode",
 "@local/dsh-boost-relay": "link:C:/CodeSource/dsh-boost/packages/boost-relay",
 "@local/dsh-boost-status": "link:C:/CodeSource/dsh-boost/packages/boost-status",
 "@local/dsh-detached-jobs": "link:C:/CodeSource/dsh-boost/packages/detached-jobs",
-"@local/dsh-guard-surrogate": "link:C:/CodeSource/dsh-boost/packages/guard-surrogate"
+"@local/dsh-guard-surrogate": "link:C:/CodeSource/dsh-boost/packages/guard-surrogate",
+"@local/dsh-boost-channel": "link:C:/CodeSource/dsh-boost/packages/boost-channel",
+"@local/dsh-boost-context-budget": "link:C:/CodeSource/dsh-boost/packages/boost-context-budget",
+"@local/dsh-boost-lessons": "link:C:/CodeSource/dsh-boost/packages/boost-lessons"
 ```
 
-et `dsh.profile.bundles` doit lister les cinq noms correspondants — dont
-`@local/dsh-guard-surrogate`, qu'il ne porte **pas** aujourd'hui. `@local/dsh-auto-update` reste tel quel
+et `dsh.profile.bundles` doit lister les **huit** noms correspondants — rien de moins. `@local/dsh-auto-update` reste tel quel
 (il vit hors du dépôt, dans `profiles\local-plugins\`). Éditer `dependencies` ne crée **aucune**
 jonction : dans cette forme, `pnpm install` (étape 0 pour le PATH) passe **avant** le redémarrage, sinon
 les bundles ne se résolvent pas.
 
-### Étape 2 — purger les trois entrées mortes du patch de profil
+### Étape 2 — purger les trois entrées mortes du patch de profil — **fait le 2026-10-01**
 
-Elles sont aux **lignes 61-66** de `profiles\web\cordis.patch.yml`, ne visent aucune ligne, et ne
-produisent que trois avertissements au démarrage, où personne ne les lit. Mesuré, `dsh --profile web
---dump-config` les imprime **en tête de sa sortie** :
+Elles étaient aux **lignes 61-66** de `profiles\web\cordis.patch.yml` (vérifié sur
+`cordis.patch.yml.20261001-015721.bak`), ne visaient aucune ligne, et ne produisaient que trois
+avertissements au démarrage, où personne ne les lit. Mesuré le 2026-09-30, `dsh --profile web
+--dump-config` les imprimait **en tête de sa sortie** :
 
 ```
 dsh: [C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml] patch: entry "time-context" not found
@@ -587,12 +632,13 @@ dsh: [C:\Users\bilel\.dsh\profiles\web\cordis.patch.yml] patch: entry "ui-schedu
   disabled: false
 ```
 
-Ces ids existent **0 fois** dans la composition 0.2.0 : leurs seules occurrences dans le `--dump-config`
-sont les trois avertissements ci-dessus (les deux autres occurrences de « schedule » sont
-`scheduledDelayMillis`, un champ de configuration sans rapport). Même famille que la ligne
-`run-detached-jobs` retirée le 29/09 (§6).
+Ces ids existaient **0 fois** dans la composition 0.2.0 : leurs seules occurrences dans le
+`--dump-config` étaient les trois avertissements ci-dessus (les deux autres occurrences de « schedule »
+sont `scheduledDelayMillis`, un champ de configuration sans rapport). Même famille que la ligne
+`run-detached-jobs` retirée le 29/09 (§6). **Mesuré le 2026-10-02 : plus aucune occurrence dans le
+fichier, et `--dump-config` ne rend plus aucun avertissement de patch.**
 
-### Étape 3 — faire revenir `/schedule` (déjà perdu)
+### Étape 3 — faire revenir `/schedule` — **fait le 2026-10-01** (il était perdu)
 
 Sous 0.1.7 ces lignes étaient portées par le cœur ; sous 0.2.0, la composition web « n'en porte aucune » —
 mot pour mot du patch de `dsh-experimental-schedule-bundle` : « Experimental Schedule over the shipped Web
@@ -603,17 +649,20 @@ composition, **which carries none of these rows** ». Il faut donc déclarer ce 
 "@deepseek-ai/dsh-experimental-schedule-bundle"
 ```
 
-**Ce n'est pas une hypothèse, c'est déjà arrivé** : mesuré, le process vit maintenant en 0.2.0-rc.2
-(pid 4248, démarré le 30/09 à 20:17:31, **après** l'installation du build) **sans** ces outils — la
-composition web ne porte aucune ligne `schedule`/`ui-schedule` et les outils `schedule_*` ont disparu.
-Sans cette déclaration, la fonction ne revient pas au redémarrage.
+**Ce n'est pas une hypothèse, c'est déjà arrivé** : mesuré le 2026-09-30, le process vivait alors en
+0.2.0-rc.2 (pid 4248, démarré le 30/09 à 20:17:31, **après** l'installation du build) **sans** ces outils —
+la composition web ne portait aucune ligne `schedule`/`ui-schedule` et les outils `schedule_*` avaient
+disparu. Sans cette déclaration, la fonction ne revenait pas au redémarrage. **Mesuré le 2026-10-02** : le
+bundle est déclaré et ses deux lignes sont composées — la sortie de `--dump-config` les porte sous
+l'en-tête `# == @deepseek-ai/dsh-experimental-schedule-bundle` (`- id: schedule`, `- id: ui-schedule`,
+lignes 1828-1834).
 
 ### Étape 4 — monter la garde anti-surrogate (§10)
 
-**L'agrégateur la porte déjà** : sa cinquième ligne est `dsh-guard-surrogate`
+**L'agrégateur la porte déjà** : l'une de ses huit lignes est `dsh-guard-surrogate`
 (`packages/guard-surrogate/cordis.patch.yml`, `config: { enabled: true }`). Avec la forme **A** de
 l'étape 1, il n'y a donc **rien** à ajouter au patch du profil — c'est précisément ce que l'agrégateur
-apporte en plus des quatre autres lignes. Avec la forme **B**, reprendre les quatre gestes du README de
+apporte en plus des sept autres lignes. Avec la forme **B**, reprendre les quatre gestes du README de
 `C:\CodeSource\dsh-boost\packages\guard-surrogate` : déclarer
 `"@local/dsh-guard-surrogate": "link:C:/CodeSource/dsh-boost/packages/guard-surrogate"` dans
 `dependencies` **et** dans `dsh.profile.bundles`, `pnpm install`, puis redémarrer (l'entrée
@@ -629,16 +678,17 @@ empêche la garde de tourner, et les chemins `final-result` ne couvrent que les 
 
 ### Étape 5 — matérialiser les jonctions
 
-Forme A : `dsh plugin add` l'a déjà fait. Forme B : `pnpm install` dans `profiles\web` (PATH de l'étape 0).
-Rien d'autre à vérifier ici : une jonction absente se voit au démarrage suivant, sous forme de bundle
-introuvable.
+Forme A : `dsh plugin add` l'a déjà fait — mesuré le 2026-10-02 :
+`profiles\web\node_modules\@local\dsh-boost` est une jonction vers `C:\CodeSource\dsh-boost`. Forme B :
+`pnpm install` dans `profiles\web` (PATH de l'étape 0). Rien d'autre à vérifier ici : une jonction absente
+se voit au démarrage suivant, sous forme de bundle introuvable.
 
 ### Étape 6 — redémarrer une fois, puis vérifier
 
 ```powershell
-dsh --profile web --dump-config      # AUCUN "patch: entry … not found"
-node --test                          # racine du dépôt consolidé : 128/128
-cd packages\detached-jobs; node --test             # 52/52
+dsh --profile web --dump-config      # AUCUN "patch: entry … not found" ; les huit ids du mode à 1
+node --test                          # racine du dépôt consolidé : 231/231
+cd packages\detached-jobs; node --test             # 56/56
 cd ..\guard-surrogate;    node --test             # 26/26
 ```
 
@@ -647,4 +697,7 @@ lancé par la racine doit rendre le texte de la racine, et un chemin annoncé do
 Côté garde, `$DSH_HOME/plugin-data/dsh-guard-surrogate/repairs.jsonl` n'existe **que** si elle a réparé
 quelque chose : son absence veut dire « rien à réparer », pas « inerte » — d'où le test `k` de son dépôt,
 qui est le seul à pouvoir distinguer les deux. Enfin, `dsh --profile web --dump-config` doit porter les
-cinq ids du mode **une fois chacun** : c'est le contrôle qui dit que la bascule est complète.
+**huit** ids du mode **une fois chacun** : c'est le contrôle qui dit que la bascule est complète, et
+c'est celui qui a été passé le 2026-10-02. Attention, `tools/cutover-profile.ps1` n'en vérifie que
+**six** (il date du 2026-10-01, quand la composition en portait six) : le contrôle complet se fait à la
+main.
