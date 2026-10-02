@@ -200,10 +200,22 @@ inheritedTokens : 440 633   windowTokens : 1 000 000   ratio : 44,06 %   seuil :
 sources : inherited=restore-boundary  window=context-pressure  frontiere seq=6057
 ```
 
-**Et le fait du harnais qui donne a cette garde sa vraie raison d'etre** : le fork tranche le journal BRUT.
-Un pere compacte transmet donc a son enfant PLUS qu'il ne detient — mesure : surface vive 16 898, heritage
-541 857, soit 32x. La garde ne protege pas le pere de son plein ; elle protege **l'enfant d'un heritage
-qu'il n'a pas demande**.
+**Ce que la garde protege, mesure** : le fork transmet le PREFIXE CLOS du pere — son journal jusqu'au
+dernier `turn/end`. Une compaction **close** est donc DANS ce prefixe, et l'enfant qui en nait voit la vue
+**compactee**. Mesure sur `018354d9` : les trois compactions ferment a 1822, 3441 et 4532, chacune avant
+une frontiere, et les deux cuts posterieurs donnent l'accord (438 501 contre 439 662 ; 437 564 contre
+424 115).
+
+**L'exception est etroite** : un fork pris PENDANT le tour ou le pere vient de compacter — la compaction
+est encore dans le tour en vol, donc apres la frontiere, donc absente du prefixe. La seulement, l'enfant
+herite de l'histoire d'avant (surface vive 16 898 contre heritage 541 857). Un fork pris au mauvais moment,
+pas le cas normal.
+
+**La vraie raison d'etre de la garde** n'est donc pas « l'enfant herite plus que le pere » : c'est que le
+prefixe herite est **grand** (440 633 dans cette session), et qu'un enfant forke qui compacte a son tour
+relit ce prefixe **au prix plein**. Mesure du corpus : **360 000 a 584 000 hors cache** par compaction
+d'enfant forke, contre une mediane de **5 933** pour une racine. Elle protege l'enfant d'une depense qu'il
+n'a pas demandee.
 
 
 ---
@@ -246,13 +258,31 @@ visible ce qui survit quand meme.* Le proprietaire n'a recu que **deux lignes** 
 - **Multi-process** : « jamais perdu » est FAUX — une course a deux processus fait echouer `channel_post`
   en `EPERM` (7 sur 342 en configuration par defaut). Limite declaree, non reparee.
 
-### Et un fait du HARNAIS, mesure au passage, qui n'est pas de notre ressort
+### Et un fait du HARNAIS, mesure au passage — **AFFIRME A TORT, puis CORRIGE le 2 octobre**
 
-**Le fork tranche le JOURNAL BRUT, pas la vue compactee.** Un pere compacte transmet donc a son enfant
-**plus qu'il ne detient** : mesure, surface vive **16 898** contre heritage **541 857**, soit **32x**. Ce
-n'est pas un defaut de ce depot — c'est une observation a remonter, et elle donne a la garde du fork sa
-vraie raison d'etre : elle ne protege pas le pere de son plein, elle protege **l'enfant d'un heritage
-qu'il n'a pas demande**.
+**Ce qui a ete affirme** : « le fork tranche le journal BRUT, donc un pere compacte transmet a son enfant
+**plus qu'il ne detient** — surface vive 16 898 contre heritage 541 857, soit **32x** ».
+
+**Pourquoi c'etait faux** : une compaction CLOSE (son `compaction/end` precede une frontiere) est DANS le
+prefixe que le fork transmet, et la surface de l'enfant l'applique — **l'enfant voit la vue compactee**.
+Mesure sur `018354d9` : les trois compactions ferment a **1822, 3441 et 4532**, chacune avant une
+frontiere ; les deux cuts posterieurs donnent l'accord (**438 501** contre **439 662** ; **437 564** contre
+**424 115**).
+
+**Ce qui est vrai, et plus etroit** : le 32x existe **uniquement** pour un fork pris pendant le tour ou la
+compaction est encore **en vol** — absente du prefixe, donc invisible pour l'enfant. C'est reel (c'est le
+cas qui a defait la premiere version du garde), mais ce n'est pas le cas normal.
+
+**Fautes commises, ecrites ici pour ne pas les refaire** : (a) j'ai cite **le seul cut divergent sur
+trois** — les deux autres montraient l'accord, et je ne les ai pas mentionnes ; (b) j'en ai tire une regle
+trop large, « ne pas forker apres une compaction », alors que la bonne est **« ne pas forker dans le tour
+meme ou l'on compacte »** ; (c) j'en ai tire une explication du COUT qui n'en avait pas besoin — la
+compaction d'un enfant forke est chere parce que le prefixe herite est **grand** (~440 000 tokens), pas
+parce qu'il serait non compacte.
+
+**La correction n'est pas venue d'une mesure mais de l'utilisateur**, qui a dit « ca n'a pas de sens ».
+Il a fallu trois commandes pour l'etablir. C'est le seul defaut de cette serie qu'aucun verificateur n'a
+trouve.
 
 ## Partie 4 — Ce qui est etabli, quoi qu'on decide
 
