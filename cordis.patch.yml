@@ -1,23 +1,23 @@
-# Couche bundle agregee Boost : UNE entree `insert:` portant les SEPT lignes
+# Couche bundle agregee Boost : UNE entree `insert:` portant les HUIT lignes
 # du mode Boost, dans cet ordre.
 #
 # Un bundle = un paquet dont `package.json` porte
 # `dsh.bundle.patch`. Le gestionnaire fait `pnpm add <spec>` puis ajoute le nom
 # en QUEUE de `dsh.profile.bundles`. Un seul bundle a declarer rend
-# l'installation reproductible en une commande, au lieu de sept.
+# l'installation reproductible en une commande, au lieu de huit.
 #
 # NE PAS INSTALLER EN MEME TEMPS QUE LES SOUS-PAQUETS : `dsh-app-boot/lib/index.js:87`
 # fait `data.push(...insert)` SANS deduplication. Deux bundles inserant le meme
 # `id` montent la ligne DEUX FOIS : preset monte deux fois, outil duplique.
 # L'agregateur et les sous-paquets s'excluent donc mutuellement.
 #
-# `name` est resolu RELATIVEMENT A CE FICHIER : les six lignes fichier
+# `name` est resolu RELATIVEMENT A CE FICHIER : les sept lignes fichier
 # portent donc `./packages/<paquet>/lib/index.js`. La ligne `preset-boost`
 # porte un nom de paquet npm, resolu par le chargeur de modules.
 #
-# Les sept lignes sont recopiees A L'IDENTIQUE depuis les sept
+# Les huit lignes sont recopiees A L'IDENTIQUE depuis les huit
 # `cordis.patch.yml` d'origine (memes `id`, memes `name`, memes `config`).
-# Seul ecart : le chemin des six `name` fichier. `test/aggregate.test.mjs`
+# Seul ecart : le chemin des sept `name` fichier. `test/aggregate.test.mjs`
 # exige cette egalite et echoue a la moindre derive.
 
 - insert:
@@ -412,3 +412,12 @@
     # dont un apres compaction (cas T-C10).
     - id: dsh-boost-context-budget
       name: ./packages/boost-context-budget/lib/index.js
+    # HUITIEME LIGNE : les lecons a la compaction, ETAPE 1 — un listener
+    # `session/event` SANS TAG qui JOURNALISE les compactions de RACINE (aucun
+    # modele, aucun enfant, aucune depense). Comme les sept autres, cette ligne
+    # est la copie A L'IDENTIQUE de `packages/boost-lessons/cordis.patch.yml` —
+    # seul le chemin du `name` change (meme raison que ci-dessus).
+    - id: dsh-boost-lessons
+      name: ./packages/boost-lessons/lib/index.js
+      config:
+        summaryFloorChars: 2000
