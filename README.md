@@ -16,6 +16,9 @@ depuis (`boost-channel`, `boost-context-budget`, `boost-lessons`) ; les huit por
 `cordis.patch.yml`, son `dsh.bundle` et ses tests : chacun reste installable seul. L'agrégateur est le
 livrable **recommandé**, pas le seul possible — et les deux formes **s'excluent** (section suivante).
 
+> **Pour reprendre dans une session neuve** : [`docs/REPRISE.md`](docs/REPRISE.md) — ce qu'il faut
+> faire en premier, ce qui est vérifié, et les pièges qui ont coûté du temps.
+
 ## Installer, pas à pas
 
 ### 1. Installer le bundle
@@ -114,7 +117,7 @@ Les deux formes s'excluent donc :
 | `@local/dsh-detached-jobs`<br>`packages/detached-jobs/` | Ajoute `run_detached` : un job d'arrière-plan possédé par la **racine** de session et non par l'agent demandeur, donc qui survit à un worker jetable. Ligne **hôte** : c'est la seule portée non scopée qui peut posséder un job au nom de la racine. | **56/56** — `test/root.test.mjs` 10 (propriété), `apply` 19 (activation, contexte strict), `shell` 8, `spill` 9, `purge` 10 | `cd packages\detached-jobs` puis `node --test` ; sondes : `node tools\probe-profile-import.mjs` (résolution par la jonction) et `node tools\probe-spill-announce.mjs` (annonce par le vrai registre) |
 | `@local/dsh-guard-surrogate`<br>`packages/guard-surrogate/` | Répare les **surrogates UTF-16 non appariés** dans les résultats d'outil, sur le waterfall `tools/post-execute`, **avant** l'écriture au journal : un seul surrogate isolé empoisonne toutes les requêtes suivantes en `HTTP 400 INVALID_REQUEST`. | **26/26** — `test/guard.test.mjs` | `cd packages\guard-surrogate` puis `node --test` |
 | `@local/dsh-boost-channel`<br>`packages/boost-channel/` | Canal de **retour** entre un enfant et le propriétaire de son arbre : une **enveloppe structurée** (jamais la charge utile), un `kind` **déclaré** par l'appelant et un `state` **dérivé** par le runtime, le réveil **décidé à l'arrêt** de l'émetteur (au dépôt, l'émetteur travaille encore), un jeton de livraison à **deux bourses** et la politique du destinataire (`channel_subscribe`). Ligne **hôte** : elle capture le service `agents` non scopé et installe ses outils dans la surface de **chaque** agent. | **52/52** — `test/channel.test.mjs`, dont quatre cas de falsification | `cd packages\boost-channel` puis `node --test` ; sondes : `node tools\probe-stop.mjs` (quel événement marque l'arrêt) et `node tools\probe-mount.mjs` (la ligne hôte installée par agent) |
-| `@local/dsh-boost-context-budget`<br>`packages/boost-context-budget/` | Occupation du contexte et **garde du fork** : `context_occupancy` mesure le préfixe qu'un fork hériterait par `SessionProjectionRegistry.restore(...)` **borné à la frontière** du dernier `turn/end` — égalité **prouvée contre un enfant RÉEL** à trois coupes, dont une après compaction — et `subagent_fork` est **refusé au-delà d'un seuil** configurable (`forkThresholdRatio`). Aucun repli : une mesure absente vaut `unknown` et la garde **s'abstient**. | **32/32** — `test/context-budget.test.mjs` | `cd packages\boost-context-budget` puis `node --test` |
+| `@local/dsh-boost-context-budget`<br>`packages/boost-context-budget/` | Occupation du contexte et **garde du fork** : `context_occupancy` mesure le préfixe qu'un fork hériterait par `SessionProjectionRegistry.restore(...)` **borné à la frontière** du dernier `turn/end` — égalité **prouvée contre un enfant RÉEL** à trois coupes, dont une après compaction — et `subagent_fork` est **refusé au-delà d'un seuil** configurable (`forkThresholdRatio`). Aucun repli : une mesure absente vaut `unknown` et la garde **s'abstient**. La compaction n'est **jamais** automatique : le père la **demande** (`context_compact`), et un refus n'arme rien. | **36/36** — `test/context-budget.test.mjs` | `cd packages\boost-context-budget` puis `node --test` |
 | `@local/dsh-boost-lessons`<br>`packages/boost-lessons/` | **Étape 1 des leçons à la compaction** : un listener `session/event` **sans tag** qui **journalise** les compactions de **racine** — mesure de fréquence, **aucun** appel de modèle, aucun enfant, aucune surface d'outil. Dédup par `compactionId` (un enfant forké porte les mêmes ids que son père) et corps **intégralement protégé** : une erreur d'écriture est comptée et repliée, jamais propagée à `Session.append`. | **14/14** — `test/lessons.test.mjs` | `cd packages\boost-lessons` puis `node --test` ; sonde : `node tools\probe-lessons.mjs` |
 
 Compteurs mesurés le **2026-10-02** sur ce disque, paquet par paquet (`node --test` dans chaque
@@ -168,7 +171,7 @@ cd packages\boost-status;         node --test   # 10/10
 cd packages\detached-jobs;        node --test   # 56/56
 cd packages\guard-surrogate;      node --test   # 26/26
 cd packages\boost-channel;        node --test   # 52/52
-cd packages\boost-context-budget; node --test   # 32/32
+cd packages\boost-context-budget; node --test   # 36/36
 cd packages\boost-lessons;        node --test   # 14/14
 cd packages\boost-mode;           node --test   #  0/0   (aucun cas : vert vacant)
 ```
