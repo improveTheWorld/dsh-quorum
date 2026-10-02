@@ -33,10 +33,11 @@ session morte de laisser des processus orphelins. La cause est le **choix du pro
 | `label` | libellé du job ; défaut : les 80 premiers caractères de la commande |
 | `cwd` | répertoire de travail ; défaut : le cwd de l'appelant |
 
-Rend `{ job_id, owner, text }`, `owner` étant toujours la session racine. Le `text` s'adresse à
-l'appelant : à la racine il dit que le job se lit avec `job_output` (`wait: true` bloque jusqu'au
-règlement) ; à un worker il dit que le job **n'est pas** lisible depuis sa session et qu'il faut rendre
-l'identifiant au propriétaire.
+Rend `{ job_id, owner, text }`, `owner` étant la **racine de la chaîne quand elle est vivante**, et
+sinon son **plus haut ancêtre vivant** — jamais une session morte (section suivante). Le `text`
+s'adresse à l'appelant : au propriétaire il dit que le job se lit avec `job_output` (`wait: true`
+bloque jusqu'au règlement) ; à un worker il dit que le job **n'est pas** lisible depuis sa session et
+qu'il faut rendre l'identifiant au propriétaire.
 
 ### Ce qui le distingue
 
@@ -47,6 +48,37 @@ fois : `ctx.agents.list()` est intermittemment vide, `agent/created` ne rejoue j
 antérieur au montage, et `listDescendants` ne voit que le catalogue d'enfants délégués — donc pas un
 `fork`. Si la racine ne peut pas être résolue, l'outil **refuse** (il lève) au lieu de démarrer un job au
 mauvais propriétaire.
+
+**Le repli quand cette racine n'est plus vivante.** Une session **CONTINUÉE** après un redémarrage est
+un fork seedé (`isSeeded`, `delegationDepth: 0`) dont le parent — la session du processus précédent —
+**ne reviendra jamais**. La marche par les en-têtes a alors raison sur la forme de l'arbre et tort sur
+le propriétaire, et les trois dispositifs tombaient avec elle. Mesuré, journal du relais, 2026-10-02
+19:31 et 19:34 :
+
+```
+{"step":"register-skipped","why":"root-agent-unknown","id":"7fa9e670","root":"018354d9"}
+{"step":"register-skipped","why":"root-agent-unknown","id":"00ce339d","root":"018354d9"}
+```
+
+`7fa9e670` est la session continuée (celle de l'utilisateur), `00ce339d` l'enfant qu'elle venait de
+créer, `018354d9` la session morte dont elles descendent — `run_detached` était donc refusé **à la
+racine même**. La règle reste inchangée au premier pas, et se complète au second :
+
+1. `rootOf(sessionId)` — les en-têtes durables, seize sauts au plus : **le chemin normal, inchangé** ;
+2. si l'agent de cette racine est **connu** (vivant, ou annoncé à ce montage) → propriétaire = **cette
+   racine**, inchangé ;
+3. sinon → propriétaire = le **plus haut ancêtre VIVANT** de la chaîne, ou l'appelant lui-même
+   lorsqu'il en est le seul vivant. Le registre vivant est consulté **une seule fois**
+   (`agents.list()`, une lecture pour toute la chaîne) pour **départager** ce choix, jamais pour
+   résoudre la chaîne ; et s'il n'y a **rien de vivant**, la résolution échoue comme avant —
+   `fail-closed`, jamais un job confié à une session qui ne peut pas le collecter.
+
+Le repli est **journalisé** quand il sert —
+`{"step":"owner-fallback","id":"7fa9e670","headerRoot":"018354d9","liveOwner":"7fa9e670"}` — parce
+qu'un repli silencieux serait indistinguable d'une résolution normale dans le seul fichier qui consigne
+ce qui s'est passé. La règle est **une seule fonction** (`resolveOwner`), partagée par la porte du
+propriétaire et par le démarrage du job : admettre l'outil parce que le propriétaire vit, puis nommer
+une session morte dans `owner:`, laisserait un job que personne ne peut lire.
 
 **2. Montage HÔTE et installation PAR AGENT, les deux depuis la même ligne.** Le niveau hôte est une
 condition de fonctionnement : seuls les enregistrements faits depuis une portée non scopée servent
@@ -105,12 +137,12 @@ clé (`dsh-agent-loop/lib/index.js:778`), et `scopeOf(agent.ctx) === agent` a é
 donc `scopeOf` **sans importer** `@deepseek-ai/dsh-scope`, dont ce paquet n'a délibérément aucune
 dépendance.
 
-**Refus total, jamais un repli.** Si la racine n'est pas résolue, si aucun agent vivant ne porte son
-identifiant, ou si son service d'outils est absent, l'outil n'est **pas** enregistré (`fail-closed`), et
-chaque refus écrit une ligne `register-skipped` portant la raison exacte — `root-not-resolved`,
-`root-agent-unknown`, `root-tools-unavailable`, `owner-cannot-collect` — tandis que chaque
-enregistrement écrit une ligne `registered` qui nomme le propriétaire. Un outil retiré sans trace
-serait un silence de plus.
+**Refus total, jamais un repli silencieux sur l'outil.** Si la racine n'est pas résolue, si **aucun
+agent vivant de la chaîne** ne peut être élu propriétaire, ou si le service d'outils de ce propriétaire
+est absent, l'outil n'est **pas** enregistré (`fail-closed`), et chaque refus écrit une ligne
+`register-skipped` portant la raison exacte — `root-not-resolved`, `root-agent-unknown`,
+`root-tools-unavailable`, `owner-cannot-collect` — tandis que chaque enregistrement écrit une ligne
+`registered` qui nomme le propriétaire. Un outil retiré sans trace serait un silence de plus.
 
 Ce paquet **n'attache aucun contrôleur**, jamais : un attachement depuis une portée non scopée servirait
 tous les propriétaires du process et élargirait l'admission pour `pwsh`/`bash` en arrière-plan, les
@@ -148,6 +180,10 @@ réellement revenu.
 - la purge ne tourne **qu'au démarrage d'un job** : un hôte qui ne lance plus jamais de job détaché garde
   sa résiduelle. Aucun timer et aucun travail d'arrière-plan ne sont possédés par ce module,
   volontairement ;
+- le repli lit le registre vivant **une fois** (`agents.list()`) : sur un hôte où ce registre répond
+  vide au mauvais moment, aucun propriétaire vivant n'est élu et l'outil est **retiré**
+  (`register-skipped(root-agent-unknown)`) — dégradé, `fail-closed`, et jamais confié à une session
+  morte ;
 - un fichier plafonné n'est jamais annoncé : un tel job rapporte `full output: (unavailable)` — dégradé,
   et honnête à ce sujet.
 
@@ -164,7 +200,7 @@ Quatre lignes : l'en-tête, si le service non scopé a été capturé, par quel 
 « premier montage »), et que `run_detached` est installé par agent depuis **ce** montage hôte, jamais
 déclaré depuis la portée d'une ligne (`lib/index.js:722-724`).
 
-## Tests — 56 cas
+## Tests — 61 cas
 
 ```
 cd packages/detached-jobs
@@ -174,10 +210,10 @@ node --test
 **`node --test` sans argument**, impérativement : le runner découvre alors `test/*.test.mjs`.
 
 ```
-1..56
-# tests 56
+1..61
+# tests 61
 # suites 0
-# pass 56
+# pass 61
 # fail 0
 # cancelled 0
 # skipped 0
@@ -202,7 +238,7 @@ Nommer un **fichier** fonctionne : `node --test test/root.test.mjs` rend `# test
 | Fichier | Cas | Ce qu'ils décident |
 |---|---|---|
 | `test/root.test.mjs` | 10 | la résolution de la racine : un saut, une chaîne multi-sauts, un **fork** (`origin` absent, `delegationDepth` 0, mais `parentSession` posé — le cas qui avait vaincu `listDescendants`), un lien parent pendant (rendu, pas supprimé), un cycle borné, une queue de frame tronquée, un log de zéro octet, le chemin de cache |
-| `test/apply.test.mjs` | 19 | le montage : contexte strict, journal du montage et de la capture, outil installé par `agent/created` **et** pour un agent déjà présent, contrat `output` du registre (son absence est une ligne `register-failed`), job possédé par la **RACINE** et jamais par le worker appelant, ce que le `text` dit à une racine, refus quand la racine est introuvable, refus quand aucun service non scopé n'a été capturé (pas de repli silencieux), second montage inerte, `apply-failed` journalisé sans rethrow, journal non inscriptible inoffensif, source pull qui ne rend jamais un octet, `pwshPath` du service `shell` suivi, repli explicite sans service `shell` ; **plus les quatre cas du prédicat de propriété** — T1 le propriétaire peut collecter, l'outil est monté ; T2 il ne peut pas, aucun outil **et** une trace `register-skipped` de raison `owner-cannot-collect` ; T3 le verdict suit le propriétaire **dans les deux sens** (worker sans `job_kill` servi par une racine qui l'a ; worker qui l'a refusé par une racine qui ne l'a pas) ; T4 propriétaire introuvable, `fail-closed` avec la raison (`root-not-resolved`, `root-agent-unknown`) |
+| `test/apply.test.mjs` | 24 | le montage : contexte strict, journal du montage et de la capture, outil installé par `agent/created` **et** pour un agent déjà présent, contrat `output` du registre (son absence est une ligne `register-failed`), job possédé par la **RACINE** et jamais par le worker appelant, ce que le `text` dit à une racine, refus quand la racine est introuvable, refus quand aucun service non scopé n'a été capturé (pas de repli silencieux), second montage inerte, `apply-failed` journalisé sans rethrow, journal non inscriptible inoffensif, source pull qui ne rend jamais un octet, `pwshPath` du service `shell` suivi, repli explicite sans service `shell` ; **plus les quatre cas du prédicat de propriété** — T1 le propriétaire peut collecter, l'outil est monté ; T2 il ne peut pas, aucun outil **et** une trace `register-skipped` de raison `owner-cannot-collect` ; T3 le verdict suit le propriétaire **dans les deux sens** (worker sans `job_kill` servi par une racine qui l'a ; worker qui l'a refusé par une racine qui ne l'a pas) ; T4 propriétaire introuvable, `fail-closed` avec la raison (`root-not-resolved`, `root-agent-unknown`) ; **plus les cinq cas du repli de propriétaire** — T-S1 racine vivante : le repli n'est **pas** pris et n'écrit rien ; T-S2 racine morte, appelant vivant : l'outil **est monté** et le job est possédé par l'appelant ; T-S3 chaîne de trois, racine morte, milieu vivant : le propriétaire est le **milieu**, pas le plus proche ; T-S4 le repli est journalisé (`owner-fallback` avec `headerRoot` et `liveOwner`) et une résolution normale n'écrit pas cette ligne ; T-S5 rien de vivant : comportement inchangé, `register-skipped(root-agent-unknown)` |
 | `test/shell.test.mjs` | 8 | l'exécutable : PowerShell 7 d'abord, repli Windows PowerShell 5.1, entrées PATH nettoyées et dé-citées, sonde d'existence (fichier ou lien, jamais un dossier), repli PATH hors Windows, le producteur lance le shell résolu, une annulation se règle en `killed` au lieu de pendre |
 | `test/spill.test.mjs` | 9 | le fichier de récupération : il contient la sortie complète d'un job qui dépasse l'anneau, la ligne de pointeur y renvoie, la sortie n'est livrée qu'**une** fois, le nom vient du job et non de l'environnement, le plafond est annoncé dans le fichier, un magasin non inscriptible ne touche pas le job, deux jobs de même identifiant laissent deux fichiers, l'annonce à l'ouverture puis au règlement, le retrait d'un fichier plafonné |
 | `test/purge.test.mjs` | 10 | la rétention : TTL, fichier récent gardé, `except` gardé même le plus ancien, plafond de 20, plancher d'âge, dossier absent inoffensif, entrée non supprimable rapportée `kept` sans rien arrêter, ni récursion ni autre nom que `*.log`, purge déclenchée par le démarrage d'un job, magasin illisible inoffensif |
@@ -214,8 +250,22 @@ compte rend `# skipped 0`.
 Les quatre cas du prédicat ont été **falsifiés** sur des copies jetables hors du dépôt, pour montrer
 qu'ils peuvent échouer : **inverser le prédicat** (enregistrer quand le propriétaire ne peut *pas*
 collecter) fait tomber 14 cas, dont T1, T2 et T3 ; **supprimer la ligne de trace** du refus, en gardant
-le prédicat, fait tomber T2, T3 et T4. La suite du dépôt (`node --test` à la racine) reste verte :
-**132 cas, 0 échec** (128 avant ces quatre cas).
+le prédicat, fait tomber T2, T3 et T4.
+
+Les cinq cas du repli ont été falsifiés de même, **sur des copies jetables hors du dépôt**, dont la
+sortie brute est citée dans le rapport de la session qui les a ajoutés :
+
+- **retirer le repli** (`resolveOwner` rendant `root-agent-unknown` dès que l'agent de la racine est
+  inconnu) fait tomber **T-S2, T-S3 et T-S4** — `# tests 61`, `# pass 58`, `# fail 3`, le premier
+  échec étant `not ok 21 - T-S2 … the continued session must be MOUNTED, not refused`, `0 !== 1` —
+  tandis que T-S1 (résolution normale) et T-S5 (`fail-closed`) **restent vertes**, ce qui est
+  exactement ce qu'elles mesurent ;
+- **élire le plus PROCHE vivant au lieu du plus haut** fait tomber **T-S3 seule** — `# tests 61`,
+  `# pass 60`, `# fail 1`.
+
+La suite du dépôt (`node --test` à la racine) reste verte : **245 cas, 0 échec** au moment de cette
+mesure — 235 avant ces cinq cas, plus cinq cas ajoutés dans la même passe à `packages/boost-channel`
+par une autre session, qui y implémente la même règle du propriétaire vivant.
 
 ## Les trois sondes
 
@@ -259,5 +309,5 @@ checkout ?), ni de ce que le **vrai** registre fait du spec qu'on lui passe, ni 
 - `lib/index.js` — résolution de la racine, producteur et fichier de récupération, rétention, outil,
   commande ;
 - `cordis.patch.yml` — la ligne **hôte** (condition de fonctionnement, pas un détail de rangement) ;
-- `test/*.test.mjs` — les 56 cas ; `tools/*.mjs` — les trois sondes ;
+- `test/*.test.mjs` — les 61 cas ; `tools/*.mjs` — les trois sondes ;
 - `README.md` — cette page, listée dans `package.json.files`.

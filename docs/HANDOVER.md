@@ -688,7 +688,7 @@ se voit au démarrage suivant, sous forme de bundle introuvable.
 ```powershell
 dsh --profile web --dump-config      # AUCUN "patch: entry … not found" ; les huit ids du mode à 1
 node --test                          # racine du dépôt consolidé : 231/231
-cd packages\detached-jobs; node --test             # 56/56
+cd packages\detached-jobs; node --test             # 61/61
 cd ..\guard-surrogate;    node --test             # 26/26
 ```
 

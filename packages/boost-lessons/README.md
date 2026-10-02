@@ -1,8 +1,9 @@
 # dsh-boost-lessons — les lecons a la compaction, ETAPE 1
 
 **Huitieme ligne de l'agregateur** `@local/dsh-boost`. Elle ne fait qu'une chose :
-**JOURNALISER chaque compaction de RACINE**, pour repondre a la seule question qui manque avant de
-construire l'extracteur — *a quelle frequence cela se declencherait-il ?*
+**JOURNALISER chaque compaction d'une session SANS PARENT VIVANT** — les racines, ET les sessions
+CONTINUEES dont le parent n'est plus la — pour repondre a la seule question qui manque avant de
+construire l'extracteur : *a quelle frequence cela se declencherait-il ?*
 
     aucun appel de modele     aucun enfant     aucune depense     aucune surface d'outil
 
@@ -16,7 +17,8 @@ La specification est `docs/LECONS.md` ; ce paquet en realise l'etape 1 du §8.
 |---|---|---|
 | 1 | listener sur `session/event`, **SANS TAG** | un listener non tague recoit les evenements de TOUTES les sessions, racines ET enfants (`dsh-scope/lib/index.js:329-335`, `if (tag === void 0) return true`) : c'est le seul point qui voie les deux sans plomberie |
 | 2 | filtre sur `event.type === 'compaction/summary'` | c'est l'instant ou LE RESUME EST DANS L'EVENEMENT et ou la surface n'est PAS encore remplacee. Ordre mesure, session `018354d9` : 1818 start -> 1820 summary -> 1821 replace -> 1822 end |
-| 3 | filtre sur `session.header.parentSession === undefined` | RACINES SEULEMENT. Le marqueur est `parentSession`, **PAS la profondeur** : une session mesuree porte `parentSession` AVEC `delegationDepth: 0`, donc tester la profondeur prendrait un enfant pour une racine. C'est ce filtre qui ferme la recursion (un enfant de profondeur 1 a compacte seul) |
+| 3 | filtre sur **l'absence de parent VIVANT** : `parentSession` absent, **ou** present et introuvable dans le registre `agents` | RACINES **ET SESSIONS CONTINUEES**. Le marqueur est `parentSession`, **PAS la profondeur** : une session mesuree porte `parentSession` AVEC `delegationDepth: 0`, donc tester la profondeur prendrait un enfant pour une racine. Un parent **VIVANT** ferme la recursion (un enfant de profondeur 1 a compacte seul) ; un parent **MORT** est le cas de la session reprise apres redemarrage — `isSeeded: true`, `delegationDepth: 0` — et ses compactions SONT la mesure attendue (mesure du 2026-10-02 19:31 : `register-skipped [why: root-agent-unknown]`, `7fa9e670` fille de la session morte `018354d9`) |
+| 3b | **sans registre** `agents` : repli sur « racines seulement », **journalise** (`filter-no-registry`) | on ne peut pas savoir si le parent est vivant : on s'abstient au lieu de deviner, et le repli est ECRIT dans `decisions.jsonl` — une fois par montage |
 | 4 | plancher de matiere `summaryFloorChars`, **2000** par defaut | valeur de DEPART, pas une calibration (`docs/LECONS.md` §7) : les resumes du corpus font en moyenne **12 896** caracteres, donc 2000 laisse passer la quasi-totalite des compactions de racine reelles — c'est voulu pour la premiere mesure |
 | 5 | dedup par **`compactionId`**, jamais par session | un enfant forke porte les MEMES ids que son pere (le seed ne republie pas, `dsh-session/lib/index.js:1273`) |
 | 6 | une ligne JSONL par compaction **retenue**, append-only, rotation d'une generation | meme couture que le journal du canal (`packages/boost-channel/lib/index.js:601-620` et `:728-747`) |
@@ -60,7 +62,14 @@ Meme repertoire, une ligne **par montage**, ecrite par `apply` **au montage** et
 compaction :
 
 ```json
-{"at":"2026-10-02T17:31:02.114Z","step":"mounted","floor":2000,"reseeded":0,"log":"C:\\Users\\bilel\\.dsh\\plugin-data\\dsh-boost-lessons\\compactions.jsonl"}
+{"at":"2026-10-02T17:31:02.114Z","step":"mounted","floor":2000,"reseeded":0,"filter":"parent-liveness","log":"C:\\Users\\bilel\\.dsh\\plugin-data\\dsh-boost-lessons\\compactions.jsonl"}
+```
+
+Et la ligne du **repli**, ecrite a la PREMIERE decision prise faute de registre — jamais une par
+evenement :
+
+```json
+{"at":"2026-10-02T20:07:17.606Z","step":"filter-no-registry","filter":"roots-only","log":"C:\\Users\\bilel\\.dsh\\plugin-data\\dsh-boost-lessons\\compactions.jsonl"}
 ```
 
 | champ | sens |
@@ -68,6 +77,7 @@ compaction :
 | `step` | `mounted` — le seul pas de cette ligne |
 | `floor` | le plancher **effectif** (celui de la configuration, pas le defaut du module) |
 | `reseeded` | le nombre d'identites re-amorcees depuis le journal **a cet instant** : c'est ce qui prouve que la re-amorce a tourne |
+| `filter` | le **mode de filtrage retenu** : `parent-liveness` si le registre `agents` repond, `roots-only` sinon. Sans ce champ, un journal vide ne dit pas si la ligne filtre sur le vivant ou si elle est retombee sur le comportement d'hier |
 | `log` | le journal observe |
 
 Pourquoi elle existe : **une configuration presente au `dump-config` ne prouve pas qu'une ligne est
@@ -87,9 +97,9 @@ de renommer (le defaut qui a coute une passe au canal).
 
 ### Compteurs (`boostLessons.stats`, en memoire, jamais ecrits)
 
-`events`, `summaries`, `retained`, `skipped_child`, `skipped_no_header`, `skipped_no_payload`,
-`skipped_below_floor`, `skipped_no_id`, `skipped_duplicate`, `write_failed`, `fallback_failed`,
-`contained`, `mount_failed`, `reseeded`, `floor_invalid`. Le service `boostLessons` porte aussi `errors` (un
+`events`, `summaries`, `retained`, `skipped_child`, `filter_no_registry`, `skipped_no_header`,
+`skipped_no_payload`, `skipped_below_floor`, `skipped_no_id`, `skipped_duplicate`, `write_failed`,
+`fallback_failed`, `contained`, `mount_failed`, `reseeded`, `floor_invalid`. Le service `boostLessons` porte aussi `errors` (un
 releve borne a 20 entrees) : c'est le repli qui ne peut pas echouer, et c'est ce qui rend un echec
 d'ecriture **observable** au lieu d'invisible.
 
@@ -107,8 +117,13 @@ ce qu'on ne peut pas identifier, et le compter deux fois dans le cas du fork ser
 | `home` | `$DSH_HOME` | racine du journal — une couture de test, jamais posee par le patch |
 | `maxBytes` | `DSH_BOOST_LESSONS_LOG_MAX_BYTES` ou 1 Mio | plafond du journal, couture de test du chemin de rotation |
 
-La ligne ne declare **aucune injection** : elle ne lit aucun service, donc rien ne peut retarder son
-montage ni le faire echouer sur un service absent. Elle **fournit** `boostLessons` (le controleur).
+La ligne **declare une injection**, `agents` — le registre vivant, comme
+`packages/boost-channel/lib/index.js:65` : le filtre a besoin de savoir si le parent est encore la, et
+la declaration est ce qui garantit que le registre est en place avant le montage (une compaction
+arrivee avant lui serait classee sur un repli). La **lecture**, elle, reste paresseuse et non lancante :
+montee sans registre — tests, sonde, composition qui ne fournit pas `agents` — la ligne ne tombe pas,
+elle retombe sur le comportement d'hier et l'ecrit (`filter-no-registry`). Elle **fournit**
+`boostLessons` (le controleur).
 
 ---
 
@@ -117,21 +132,44 @@ montage ni le faire echouer sur un service absent. Elle **fournit** `boostLesson
     node --test packages/boost-lessons/test/lessons.test.mjs
     node packages/boost-lessons/tools/probe-lessons.mjs
 
-* les **14 cas** T-L1..T-L10 tiennent le filtre, le plancher, la dedup, la rotation, le re-amorcage,
-  la **trace de montage** (T-L9 : le plancher effectif et un `reseeded` REEL, pas une constante) et les
-  trois formes d'echec d'ecriture — chemin inecrivable, ecriture refusee sur le fichier lui-meme, et
-  repertoire de trace impossible (T-L10 : le montage ne leve pas et rien n'est ecrit) ;
+* les **19 cas** tiennent le filtre, le plancher, la dedup, la rotation, le re-amorcage, la **trace de
+  montage** (T-L9 : le plancher effectif et un `reseeded` REEL, pas une constante) et les trois formes
+  d'echec d'ecriture — chemin inecrivable, ecriture refusee sur le fichier lui-meme, et repertoire de
+  trace impossible (T-L10 : le montage ne leve pas et rien n'est ecrit) ;
+* les **cinq cas T-T1..T-T5** tiennent la regle du parent VIVANT, chacun avec de quoi ECHOUER :
+  **T-T1** racine -> RETENUE (registre vivant ou pas) ; **T-T2** parent VIVANT -> ECARTEE, avec son
+  temoin de racine ; **T-T3** parent MORT -> **RETENUE** — la session CONTINUEE, le cas qui a tout
+  casse — avec, dans le MEME montage, le temoin que le parent vivant fait toujours taire son enfant ;
+  **T-T4** sans service `agents`, le comportement d'hier tient ET le repli est JOURNALISE
+  (`filter-no-registry`, une seule ligne pour deux decisions), et le registre fourni APRES le montage
+  est vu ; **T-T5** la trace de montage nomme le mode retenu, dans les deux cas ;
 * le **probe** monte une VRAIE application cordis et de VRAIES `Session` (`@deepseek-ai/dsh-session`),
   et mesure de bout en bout : une racine ecrit, un enfant non (avec son temoin), le fork ne double
-  pas, le plancher tient, l'imprevu ne leve pas, le journal inecrivable ne propage rien — et un
-  **controle de vivacite** prouve que l'absence d'alerte de log veut dire quelque chose (un listener
-  qui jette pour de vrai EST vu par le meme exportateur).
+  pas, le plancher tient, l'imprevu ne leve pas, le journal inecrivable ne propage rien, le repli sans
+  registre est journalise, et **une session CONTINUEE reelle** — germe contigu, `isSeeded: true`,
+  `delegationDepth: 0`, parent mort `018354d9` — est RETENUE quand l'enfant d'un parent vivant se tait
+  (section 8) ; un **controle de vivacite** prouve que l'absence d'alerte de log veut dire quelque
+  chose (un listener qui jette pour de vrai EST vu par le meme exportateur).
 
 ### Falsification
 
 Sur une copie jetable, retirer la protection du corps du listener (le `try/catch` de `note`) et
 relancer le cas T-L5 : il doit ROUGIR. Sans lui, la levee remonte dans l'enveloppe du harnais — qui la
 journalise, et, sur un contexte sans logger, la laisse echapper de `Session.append` elle-meme.
+
+Sur la MEME copie jetable, remettre le filtre d'hier — `if (header.parentSession !== undefined) return
+{ action: 'skip', counter: 'skipped_child' }` a la place des trois portes de `parentVerdict` — et
+relancer le cas **T-T3** : il doit ROUGIR. Mesure du 2026-10-02, sur la copie :
+
+```
+not ok 1 - T-T3 : parent MORT -> RETENUE (la session continuee : le cas manquant)
+  error: |-
+    une session CONTINUEE doit etre RETENUE : son parent n est plus vivant
+    0 !== 1
+# tests 1
+# pass 0
+# fail 1
+```
 
 ---
 

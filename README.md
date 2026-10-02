@@ -166,13 +166,13 @@ node --test tools/tests.test.mjs             # racine (lecteur de logs)    22/22
 Puis, **le répertoire du paquet comme dossier courant** :
 
 ```powershell
-cd packages\boost-relay;          node --test   # 14/14
+cd packages\boost-relay;          node --test   # 20/20
 cd packages\boost-status;         node --test   # 10/10
-cd packages\detached-jobs;        node --test   # 56/56
+cd packages\detached-jobs;        node --test   # 61/61
 cd packages\guard-surrogate;      node --test   # 26/26
-cd packages\boost-channel;        node --test   # 52/52
+cd packages\boost-channel;        node --test   # 57/57
 cd packages\boost-context-budget; node --test   # 36/36
-cd packages\boost-lessons;        node --test   # 14/14
+cd packages\boost-lessons;        node --test   # 19/19
 cd packages\boost-mode;           node --test   #  0/0   (aucun cas : vert vacant)
 ```
 

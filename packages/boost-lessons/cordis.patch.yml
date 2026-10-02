@@ -3,12 +3,23 @@
 # Niveau HOST, et le listener est SANS TAG : un listener non tague recoit les
 # evenements de TOUTES les sessions, racines ET enfants
 # ('dsh-scope/lib/index.js:329-335', 'if (tag === void 0) return true'). C'est le
-# seul point qui voie les deux sans plomberie — et le filtre « racines seulement »
-# ('session.header.parentSession === undefined') est applique DANS le listener,
-# pas par la portee de la ligne.
+# seul point qui voie les deux sans plomberie — et le filtre « PAS DE PARENT
+# VIVANT » est applique DANS le listener, pas par la portee de la ligne :
+#   - 'parentSession' ABSENT  -> RETENUE (une racine) ;
+#   - parent present ET VIVANT -> ECARTEE (l'enfant : c'est ce qui ferme la
+#     recursion) ;
+#   - parent present ET MORT   -> RETENUE (la session CONTINUEE : apres un
+#     redemarrage, la session reprise est un fork seede dont le parent n'est plus
+#     la, et c'est SA frequence que la ligne mesure — mesure du 2026-10-02 19:31,
+#     'register-skipped [why: root-agent-unknown]' pour '7fa9e670', fille de la
+#     session morte '018354d9').
 #
-# La ligne ne declare AUCUNE injection : elle ne lit aucun service. Elle n'ouvre
-# aucune surface d'outil, ne lance aucun enfant et n'appelle aucun modele.
+# La ligne DECLARE l'injection 'agents' (le registre vivant, comme
+# 'packages/boost-channel/lib/index.js:65') : c'est ce qui garantit que le registre
+# est en place AVANT le montage. Sa LECTURE reste paresseuse et non lancante, et
+# son absence est un repli JOURNALISE ('filter-no-registry') sur « racines
+# seulement » — on s'abstient au lieu de deviner. Elle n'ouvre aucune surface
+# d'outil, ne lance aucun enfant et n'appelle aucun modele.
 #
 # 'summaryFloorChars' est le plancher de matiere : 2000 caracteres de resume est
 # la VALEUR DE DEPART ecrite ici ET dans le defaut du module

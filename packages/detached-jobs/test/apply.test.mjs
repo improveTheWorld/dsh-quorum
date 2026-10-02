@@ -212,6 +212,58 @@ for (const home of [homeG, homeH, homeI, homeJ]) {
   ])
 }
 
+// ---------------------------------------------------------------------------------------
+// T-S1..T-S5: the OWNER FALLBACK — a session CONTINUED after a restart.
+//
+// The parent such a session inherits from the durable headers is the session of the PREVIOUS
+// process: it is seeded (`isSeeded`, `delegationDepth: 0`) and that parent will never come
+// back. The header walk is right about the shape of the tree and wrong about the owner, so
+// every device that walked to it fell. Measured, relay journal, 2026-10-02 19:31 and 19:34:
+//
+//   {"step":"register-skipped","why":"root-agent-unknown","id":"7fa9e670","root":"018354d9"}
+//   {"step":"register-skipped","why":"root-agent-unknown","id":"00ce339d","root":"018354d9"}
+//
+// `7fa9e670` is the continued session (the user's), `00ce339d` the child it had just created,
+// and `018354d9` the dead session both descend from — so `run_detached` was refused at the root
+// itself, and no test covered it. FIVE homes, because the fallback reads the LIVE registry,
+// which is module-level state: two scenarios cannot share a module instance.
+// ---------------------------------------------------------------------------------------
+const homeS1 = mkdtempSync(join(tmpdir(), 'dsh-detached-s1-'))
+const homeS2 = mkdtempSync(join(tmpdir(), 'dsh-detached-s2-'))
+const homeS3 = mkdtempSync(join(tmpdir(), 'dsh-detached-s3-'))
+const homeS4 = mkdtempSync(join(tmpdir(), 'dsh-detached-s4-'))
+const homeS5 = mkdtempSync(join(tmpdir(), 'dsh-detached-s5-'))
+// T-S1: a LIVE header root — the non-regression case. The CALLER is live too, so a resolution
+// that took the nearest live agent instead of the highest would answer `child` and be caught.
+seedSessions(homeS1, [
+  { id: 'session-root' },
+  { id: 'session-child', parentSession: 'session-root' },
+])
+// T-S2: the measured shape — the continued session itself, whose header parent is dead.
+seedSessions(homeS2, [
+  { id: 'session-dead' },
+  { id: 'session-alive', parentSession: 'session-dead' },
+])
+// T-S3: a chain of three, dead root, MIDDLE alive — the shape `00ce339d` measured.
+seedSessions(homeS3, [
+  { id: 'session-dead' },
+  { id: 'session-middle', parentSession: 'session-dead' },
+  { id: 'session-leaf', parentSession: 'session-middle' },
+])
+// T-S4: BOTH paths in ONE journal — a live root and a dead one — so 'the fallback is
+// journalled' and 'a normal resolution writes no such line' are read off the same file.
+seedSessions(homeS4, [
+  { id: 'session-root' },
+  { id: 'session-child', parentSession: 'session-root' },
+  { id: 'session-dead' },
+  { id: 'session-orphan', parentSession: 'session-dead' },
+])
+// T-S5: the dead root with NO live agent anywhere — the behaviour must not have moved.
+seedSessions(homeS5, [
+  { id: 'session-dead' },
+  { id: 'session-orphan', parentSession: 'session-dead' },
+])
+
 // Scenario C: the journal path exists and is NOT writable, because it is a directory.
 mkdirSync(join(homeC, 'plugin-data', 'dsh-boost-relay', 'decisions.jsonl'), { recursive: true })
 
@@ -235,9 +287,19 @@ process.env.DSH_HOME = homeI
 const I = await import('../lib/index.js?scenario=t3-owner-decides')
 process.env.DSH_HOME = homeJ
 const J = await import('../lib/index.js?scenario=t4-owner-unfindable')
+process.env.DSH_HOME = homeS1
+const S1 = await import('../lib/index.js?scenario=ts1-live-root')
+process.env.DSH_HOME = homeS2
+const S2 = await import('../lib/index.js?scenario=ts2-dead-root')
+process.env.DSH_HOME = homeS3
+const S3 = await import('../lib/index.js?scenario=ts3-middle-alive')
+process.env.DSH_HOME = homeS4
+const S4 = await import('../lib/index.js?scenario=ts4-fallback-journal')
+process.env.DSH_HOME = homeS5
+const S5 = await import('../lib/index.js?scenario=ts5-nothing-live')
 
 test.after(() => {
-  for (const home of [homeA, homeB, homeC, homeD, homeE, homeF, homeG, homeH, homeI, homeJ]) {
+  for (const home of [homeA, homeB, homeC, homeD, homeE, homeF, homeG, homeH, homeI, homeJ, homeS1, homeS2, homeS3, homeS4, homeS5]) {
     rmSync(home, { recursive: true, force: true })
   }
 })
@@ -590,4 +652,155 @@ test('T4 - an unfindable owner means NO tool, and the journal names which condit
     ['ghost', 'root-not-resolved'],
     ['child', 'root-agent-unknown'],
   ])
+})
+
+// ---------------------------------------------------------------------------------------
+// T-S1..T-S5: the owner fallback. Each case has to be able to FAIL, and the falsification is
+// recorded in the package README: reverting the fallback (owner = the header root, always)
+// turns T-S2, T-S3 and T-S4 red, and electing the NEAREST live agent instead of the highest
+// turns T-S1 and T-S3 red. T-S5 is the fail-closed floor: it must stay green in both.
+// ---------------------------------------------------------------------------------------
+
+test('T-S1 - a LIVE header root stays the owner, and the fallback is not taken', async () => {
+  const rootRegistered = []
+  const childRegistered = []
+  const mount = makeCtx({
+    existingAgents: [
+      makeAgent('session-root', rootRegistered, { knows: new Set(['job_kill']) }),
+      // The caller is live too, which is the point: a resolution that preferred the NEAREST
+      // live agent would name `session-child` here, and every assertion below catches that.
+      makeAgent('session-child', childRegistered, { knows: new Set(['job_kill']) }),
+    ],
+  })
+  S1.apply(mount.ctx, undefined)
+  assert.equal(rootRegistered.length, 1)
+  assert.equal(childRegistered.length, 1, 'the worker still receives the tool')
+  const lines = journalOf(homeS1)
+  assert.equal(
+    lines.filter((line) => line.step === 'owner-fallback').length,
+    0,
+    'a LIVE root is resolved by the headers alone: no fallback line may be written',
+  )
+  assert.deepEqual(
+    lines.filter((line) => line.step === 'registered').map((line) => [line.id, line.root]),
+    [['root', 'root'], ['child', 'root']],
+    'the owner is the ROOT, never the live caller',
+  )
+  const result = await childRegistered[0].execute(
+    { command: 'echo hi', label: 's1' },
+    { agent: { session: { id: 'session-child' } } },
+  )
+  assert.equal(result.owner, 'session-root', 'the job goes to the header root')
+  assert.equal(mount.state.started.length, 1)
+  assert.equal(mount.state.started[0].owner, 'session-root')
+})
+
+test('T-S2 - a DEAD header root hands the tool AND the job to the LIVE caller', async () => {
+  const registered = []
+  const mount = makeCtx({
+    existingAgents: [makeAgent('session-alive', registered, { knows: new Set(['job_kill']) })],
+  })
+  S2.apply(mount.ctx, undefined)
+  assert.equal(registered.length, 1, 'the continued session must be MOUNTED, not refused')
+  assert.equal(registered[0].name, 'run_detached')
+  const lines = journalOf(homeS2)
+  assert.equal(
+    lines.filter((line) => line.step === 'register-skipped').length,
+    0,
+    'the measured failure was exactly this line, for exactly this id',
+  )
+  const fallback = lines.filter((line) => line.step === 'owner-fallback')
+  assert.equal(fallback.length, 1, 'the fallback that SERVED is written, once')
+  assert.deepEqual(
+    [fallback[0].id, fallback[0].headerRoot, fallback[0].liveOwner],
+    ['alive', 'dead', 'alive'],
+    'the line must name the root the HEADERS returned and the owner that was elected',
+  )
+  assert.deepEqual(
+    lines.filter((line) => line.step === 'registered').map((line) => [line.id, line.root, line.via]),
+    [['alive', 'alive', 'owner-can-collect']],
+  )
+  // The gate and the job start must share ONE resolution: admitting the tool and then naming
+  // the dead root in `owner:` would leave a job nobody can read.
+  const result = await registered[0].execute(
+    { command: 'echo hi', label: 's2' },
+    { agent: { session: { id: 'session-alive' } } },
+  )
+  assert.equal(result.owner, 'session-alive')
+  assert.equal(mount.state.started.length, 1)
+  assert.equal(mount.state.started[0].owner, 'session-alive', 'never the dead `session-dead`')
+  assert.match(result.text, /owned by this session/)
+  assert.doesNotMatch(result.text, /NOT readable from your session/)
+  assert.equal(
+    journalOf(homeS2).filter((line) => line.step === 'owner-fallback').length,
+    2,
+    'the job start resolves the owner through the same rule, and journals it too',
+  )
+})
+
+test('T-S3 - dead root, live MIDDLE: the highest live ancestor owns both descendants', () => {
+  const registered = []
+  const mount = makeCtx({
+    existingAgents: [
+      makeAgent('session-middle', registered, { knows: new Set(['job_kill']) }),
+      makeAgent('session-leaf', registered, { knows: new Set(['job_kill']) }),
+    ],
+  })
+  S3.apply(mount.ctx, undefined)
+  assert.equal(registered.length, 2, 'both live agents are served')
+  const lines = journalOf(homeS3)
+  // `session-middle` is one hop below the dead root; `session-leaf` is two. Neither is the
+  // header root, and the leaf is NOT owned by itself — that is the whole distinction.
+  assert.deepEqual(
+    lines.filter((line) => line.step === 'registered').map((line) => [line.id, line.root]),
+    [['middle', 'middle'], ['leaf', 'middle']],
+    'the HIGHEST live ancestor owns, never the nearest live one',
+  )
+  assert.deepEqual(
+    lines.filter((line) => line.step === 'owner-fallback').map((line) => [line.id, line.headerRoot, line.liveOwner]),
+    [['middle', 'dead', 'middle'], ['leaf', 'dead', 'middle']],
+  )
+})
+
+test('T-S4 - the fallback is journalled, and a normal resolution writes no such line', () => {
+  const mount = makeCtx({
+    existingAgents: [
+      makeAgent('session-root', [], { knows: new Set(['job_kill']) }),
+      makeAgent('session-child', [], { knows: new Set(['job_kill']) }),
+      makeAgent('session-orphan', [], { knows: new Set(['job_kill']) }),
+    ],
+  })
+  S4.apply(mount.ctx, undefined)
+  const lines = journalOf(homeS4)
+  // TWO resolutions in ONE journal: `child` through its live root, `orphan` through the
+  // fallback. A line written on every resolution — or on none — fails right here.
+  assert.deepEqual(
+    lines.filter((line) => line.step === 'registered').map((line) => [line.id, line.root]),
+    [['root', 'root'], ['child', 'root'], ['orphan', 'orphan']],
+  )
+  const fallback = lines.filter((line) => line.step === 'owner-fallback')
+  assert.equal(fallback.length, 1, 'exactly the one resolution that needed it')
+  assert.deepEqual(
+    [fallback[0].id, fallback[0].headerRoot, fallback[0].liveOwner],
+    ['orphan', 'dead', 'orphan'],
+  )
+})
+
+test('T-S5 - no live agent anywhere on the chain: unchanged refusal, journalled', () => {
+  const mount = makeCtx()
+  S5.apply(mount.ctx, undefined)
+  const registered = []
+  mount.state.created({ agent: makeAgent('session-orphan', registered), source: 'spawn' })
+  assert.equal(registered.length, 0, 'fail closed: a chain with nothing alive mounts nothing')
+  const lines = journalOf(homeS5)
+  assert.equal(
+    lines.filter((line) => line.step === 'owner-fallback').length,
+    0,
+    'a fallback that elects nobody is not a fallback that served: no line may claim one',
+  )
+  assert.deepEqual(
+    lines.filter((line) => line.step === 'register-skipped').map((line) => [line.id, line.why, line.root]),
+    [['orphan', 'root-agent-unknown', 'dead']],
+    'the reason and the root are the ones this module already published',
+  )
 })

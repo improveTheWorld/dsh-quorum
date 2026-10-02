@@ -32,6 +32,7 @@ import {
   WakeLimiter,
   apply,
   buildTools,
+  channelFile,
   clipSummary,
   createChannel,
   deriveState,
@@ -1677,6 +1678,157 @@ test('T-V1 : les trois outils rendent une valeur que le REGISTRE accepte', async
   } finally {
     try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ===========================================================================
+// T-R1 a T-R5 : LE PROPRIETAIRE DE L'ARBRE — le plus haut ancetre VIVANT.
+//
+// LE CAS QU'AUCUN CAS NE COUVERAIT : une session CONTINUEE. Apres un
+// redemarrage, la session reprise est un fork seede ('isSeeded: true',
+// 'delegationDepth: 0') dont le parent — la session d'avant — n'est plus
+// vivant. La chaine remontait jusqu'a ce parent MORT et s'y arretait : la racine
+// resolvait vers une session morte, donc 'channel_post' rendait 'no-owner',
+// 'channel_read' une page vide suivie de 'read_refused' (l'appelant n'etait pas
+// proprietaire de son propre arbre), et un ENFANT adressait ses messages a la
+// racine morte. Mesure du 2026-10-02 19:31 et 19:34 : posted=2 delivered=0
+// wake_refused=2 read=0 read_refused=2.
+//
+// ATTENTION AUX ETIQUETTES : T-R1, T-R2 et T-R4 sont DEJA portees par les cas
+// de ROTATION plus haut. Les cinq cas ci-dessous sont ceux de la PROPRIETE, et
+// le titre le dit ; les deux familles ont chacune leur cas, aucun n'est
+// renomme.
+// ===========================================================================
+
+/** Un registre reduit a une chaine de parente : '{ [id, parentSession] }'. */
+function chainOf(links) {
+  const agents = new Map()
+  for (const [id, parent] of links) {
+    agents.set(id, {
+      id,
+      status: 'running',
+      session: { id, header: parent === undefined ? {} : { parentSession: parent } },
+    })
+  }
+  return { get: (id) => agents.get(id), list: () => [...agents.values()] }
+}
+
+/**
+ * L'ARBRE D'UNE SESSION CONTINUEE, monte sur un canal REEL : la session reprise
+ * descend d'une session MORTE — jamais enregistree dans le registre — et elle a
+ * un enfant. Le journal est capte par le test, donc 'owner' est lisible.
+ */
+function mountResumed() {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-channel-resumed-'))
+  const calls = []
+  const entries = []
+  const agents = new Map()
+  const add = (id, parent) => {
+    const agent = {
+      id,
+      status: 'running',
+      session: { id, header: parent === undefined ? {} : { parentSession: parent } },
+      inject: (message) => calls.push({ method: 'inject', to: id, message }),
+      send: (message, target, wakeup) => calls.push({ method: 'send', to: id, message, target, wakeup }),
+    }
+    agents.set(id, agent)
+    return agent
+  }
+  const resumed = add('session-resumed', 'session-dead')
+  const child = add('session-child', 'session-resumed')
+  const channel = createChannel({
+    home,
+    agents: { get: (id) => agents.get(id), list: () => [...agents.values()] },
+    // EXACTEMENT le cablage de 'apply' ('lib/index.js', rootOf du canal).
+    rootOf: (id) => liveRootOf(agents, id),
+    factsOf: (from) => ({ live: agents.get(from) !== undefined, status: agents.get(from)?.status }),
+    now: () => 0,
+    makeMessage: (envelope) => ({ id: 'fake:' + envelope.id, role: 'user', content: [{ type: 'text', text: envelope.summary }] }),
+    journal: (entry) => entries.push(entry),
+  })
+  return { home, calls, entries, resumed, child, channel }
+}
+
+test('T-R1 : propriete — un parent ABSENT du registre rend l appelant LUI-MEME, jamais le parent mort', () => {
+  // 'session-resumed' descend de 'session-dead', qui n'est plus vivant.
+  const agents = chainOf([['session-resumed', 'session-dead']])
+  assert.equal(liveRootOf(agents, 'session-resumed'), 'session-resumed',
+    'un parent mort ne doit JAMAIS devenir le proprietaire')
+  // Idempotence : la racine d'une racine est elle-meme.
+  assert.equal(liveRootOf(agents, liveRootOf(agents, 'session-resumed')), 'session-resumed')
+  // Sans parent du tout, la reponse est la meme : non-regression du cas racine.
+  assert.equal(liveRootOf(chainOf([['session-alone', undefined]]), 'session-alone'), 'session-alone')
+})
+
+test('T-R2 : propriete — trois niveaux dont le grand-pere est mort : rend le plus haut VIVANT (le milieu)', () => {
+  const agents = chainOf([['session-mid', 'session-dead'], ['session-leaf', 'session-mid']])
+  assert.equal(liveRootOf(agents, 'session-leaf'), 'session-mid',
+    'le milieu est vivant, le grand-pere ne l est pas : on s ARRETE au milieu')
+  // Le milieu, lui, n'a plus d'ancetre vivant : il est le proprietaire.
+  assert.equal(liveRootOf(agents, 'session-mid'), 'session-mid')
+})
+
+test('T-R3 : propriete — chaine entierement vivante : rend bien la RACINE (non-regression)', () => {
+  const agents = chainOf([
+    ['session-root', undefined],
+    ['session-mid', 'session-root'],
+    ['session-leaf', 'session-mid'],
+  ])
+  assert.equal(liveRootOf(agents, 'session-leaf'), 'session-root')
+  assert.equal(liveRootOf(agents, 'session-mid'), 'session-root')
+  assert.equal(liveRootOf(agents, 'session-root'), 'session-root')
+  // La borne de 16 sauts tient : un cycle rend un id de la chaine, sans boucler.
+  const cycle = chainOf([['a', 'b'], ['b', 'a']])
+  assert.ok(['a', 'b'].includes(liveRootOf(cycle, 'a')), 'un registre malforme ne boucle pas')
+})
+
+test('T-R4 : propriete — une session CONTINUEE depose, et se relit ELLE-MEME (owner: true)', async () => {
+  const { home, entries, resumed, channel } = mountResumed()
+  try {
+    // Par la SURFACE D'OUTIL — le chemin exact de l'incident : 'channel_post'
+    // depuis la session continuee rendait 'no-owner'.
+    const [post, read] = buildTools(channel)
+    const posted = await post.execute({ kind: 'question', summary: 'la session reprise parle' }, { agent: resumed })
+    assert.notEqual(posted.wake, 'no-owner', 'la racine morte ne doit plus etre le destinataire')
+    assert.equal(posted.wake, 'self', 'la session continuee EST sa propre racine : elle se parle, sans reveil')
+    assert.equal(posted.id, 'session-resumed:1')
+    assert.equal(channel.stats().wake_refused, 0)
+    const page = await read.execute({}, { agent: resumed })
+    assert.equal(page.count, 1, 'le proprietaire doit pouvoir relire son propre arbre')
+    assert.equal(page.envelopes[0].summary, 'la session reprise parle')
+    assert.equal(page.envelopes[0].to, resumed.id)
+    assert.equal(channel.stats().read_refused, 0, 'la session continuee N EST PAS un lecteur refuse')
+    const reads = entries.filter((row) => row.step === 'read')
+    assert.equal(reads.length, 1)
+    assert.equal(reads[0].owner, true, 'channel_read la traite en PROPRIETAIRE de l arbre')
+    assert.equal(reads[0].n, 1)
+    // Le magasin de la session MORTE n'a jamais ete ecrit : le message n'est pas
+    // parti dans l'arbre d'avant.
+    assert.equal(existsSync(channelFile('session-dead', home)), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('T-R5 : propriete — l enfant de la session CONTINUEE depose, et c est ELLE qui recoit (to = elle)', async () => {
+  const { home, calls, resumed, child, channel } = mountResumed()
+  try {
+    const [post, read] = buildTools(channel)
+    const posted = await post.execute({ kind: 'avancement', summary: 'de l enfant de la reprise' }, { agent: child })
+    assert.equal(posted.wake, 'injected', 'le message est livre au proprietaire VIVANT, sans reveil')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'inject')
+    assert.equal(calls[0].to, resumed.id, 'la livraison va a la session continuee, pas a la racine morte')
+    const page = await read.execute({}, { agent: resumed })
+    assert.equal(page.count, 1, 'la session continuee recoit ce que son enfant a depose')
+    assert.equal(page.envelopes[0].to, resumed.id)
+    assert.equal(page.envelopes[0].from, child.id)
+    // L'adressage tient toujours : l'enfant n'est pas proprietaire de l'arbre.
+    assert.deepEqual(channel.read({ from: child.id }), [])
+    assert.equal(channel.stats().read_refused, 1)
+    assert.equal(existsSync(channelFile('session-dead', home)), false, 'rien n est ecrit dans l arbre mort')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
   }
 })
 

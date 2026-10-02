@@ -12,10 +12,18 @@
  *   - il ne retient que 'compaction/summary' — l'instant ou LE RESUME EST DANS
  *     L'EVENEMENT et ou la surface n'est PAS encore remplacee (ordre mesure :
  *     start 1818, summary 1820, replace 1821, end 1822) ;
- *   - il ne retient que les RACINES : 'session.header.parentSession === undefined'.
- *     Le marqueur de parente est 'parentSession', PAS la profondeur — une session
- *     mesuree porte 'parentSession' AVEC 'delegationDepth: 0'. C'est ce filtre qui
- *     ferme la recursion (un enfant de profondeur 1 a compacte seul, mesure) ;
+ *   - il ne retient que les sessions SANS PARENT VIVANT : 'parentSession' absent,
+ *     ou present ET introuvable dans le registre VIVANT des agents (service
+ *     'agents'). Le marqueur de parente est 'parentSession', PAS la profondeur —
+ *     une session mesuree porte 'parentSession' AVEC 'delegationDepth: 0'. C'est ce
+ *     filtre qui ferme la recursion (un enfant de profondeur 1 a compacte seul,
+ *     mesure), ET c'est lui qui RETIENT une session CONTINUEE : apres un
+ *     redemarrage, la session reprise est un fork seede ('isSeeded: true',
+ *     'delegationDepth: 0') dont le parent n'est plus vivant, donc ses compactions
+ *     SONT la mesure attendue. Un filtre par 'parentSession === undefined' la
+ *     prenait pour un enfant et l'ignorait — mesure du 2026-10-02 19:31 et 19:34,
+ *     'register-skipped [why: root-agent-unknown]' pour '7fa9e670' et '00ce339d',
+ *     filles de la session morte '018354d9' ;
  *   - il ne retient qu'au-dessus d'un PLANCHER de matiere configurable
  *     ('summaryFloorChars', 2000 caracteres par defaut, voir la constante) ;
  *   - il DEDUPLIQUE par 'compactionId', jamais par session : un enfant forke
@@ -25,10 +33,14 @@
  *     avec rotation d'une generation comme le journal du canal
  *     ('packages/boost-channel/lib/index.js:601-620' et ':728-747') ;
  *   - il laisse une TRACE DE MONTAGE dans 'decisions.jsonl' du meme repertoire
- *     ('{ at, step: "mounted", floor, reseeded, log }'), ecrite AU MONTAGE et
- *     jamais a la premiere compaction : une configuration au 'dump-config' ne
+ *     ('{ at, step: "mounted", floor, reseeded, filter, log }'), ecrite AU MONTAGE
+ *     et jamais a la premiere compaction : une configuration au 'dump-config' ne
  *     prouve pas qu'une ligne est montee, et un controle qui ne se declenche pas
- *     ressemble a un controle qui passe.
+ *     ressemble a un controle qui passe. 'filter' est le mode RETENU
+ *     ('parent-liveness' avec registre, 'roots-only' sans) ;
+ *   - sans registre vivant, il DEGRADE : on ne peut pas savoir si le parent est
+ *     vivant, donc on s'abstient et on retombe sur le comportement d'hier — les
+ *     enfants sont ecartes — en ECRIVANT pourquoi ('filter-no-registry').
  *
  * Ce qu'il ne fait PAS, et c'est la mission : aucun appel de modele, aucun enfant,
  * aucune depense. L'extracteur est l'etape 3 de la spec, pas celle-ci. Ajouter un
@@ -49,6 +61,32 @@ import { dirname, join } from 'node:path'
 
 /** Identite de la ligne : c'est aussi le nom du repertoire sous 'plugin-data'. */
 export const name = 'dsh-boost-lessons'
+
+/**
+ * LE REGISTRE VIVANT DES AGENTS, declare — c'est ce qui rend la lecture honnete.
+ *
+ * Le filtre pose UNE question qui n'est pas dans l'en-tete de la session : ce
+ * parent est-il ENCORE VIVANT ? Seul le service 'agents' y repond, et il se
+ * DECLARE ('packages/boost-channel/lib/index.js:65' fait de meme). Une lecture non
+ * declaree LEVE (« cannot get property "agents" without inject », mesure), et
+ * l'ordre n'est plus garanti : une compaction arrivee avant le registre serait
+ * classee sur un repli. Avec la declaration, la ligne attend le registre ; un
+ * demarrage qui ne le fournit pas la signale 'pending … missing: [agents]' au lieu
+ * de la laisser morte en silence ('dsh-app-boot/lib/index.js:3932-3940').
+ *
+ * La declaration ne dispense PAS de se proteger : la LECTURE reste paresseuse et
+ * non lancante, et son absence est un repli JOURNALISE, jamais un silence.
+ */
+export const inject = ['agents']
+
+/** Mode de filtrage : le parent est cherche dans le registre vivant. */
+export const FILTER_PARENT_LIVENESS = 'parent-liveness'
+
+/** Mode de filtrage : registre indisponible — les enfants sont ecartes (repli). */
+export const FILTER_ROOTS_ONLY = 'roots-only'
+
+/** Le pas journalise UNE fois quand le repli 'roots-only' decide a la place du registre. */
+export const FILTER_FALLBACK_STEP = 'filter-no-registry'
 
 /**
  * PLANCHER DE MATIERE par defaut, en CARACTERES de resume : 2000.
@@ -181,6 +219,45 @@ export function isRootSession(session) {
 }
 
 /**
+ * LE PARENT EST-IL VIVANT ? — la question que le filtre pose desormais, en une
+ * fonction PURE elle aussi (elle ne lit que la session et le registre qu'on lui
+ * donne).
+ *
+ * Quatre verdicts, et le quatrieme est le repli :
+ *   - 'no-header'     : pas d'en-tete — on ne peut rien PROUVER ('skipped_no_header') ;
+ *   - 'no-parent'     : 'parentSession' ABSENT — la session est une racine, RETENUE ;
+ *   - 'parent-alive'  : le parent est dans le registre — c'est un enfant, ECARTEE
+ *                       (c'est ce qui ferme la recursion) ;
+ *   - 'parent-dead'   : le parent n'y est pas — session CONTINUEE, RETENUE ;
+ *   - 'no-registry'   : registre absent, ou sa lecture a echoue — on ne peut pas
+ *                       savoir, donc on S'ABSTIENT et on retombe sur le
+ *                       comportement d'hier : l'enfant est ecarte, et le repli est
+ *                       journalise ('filter-no-registry'). Un controle qui devine
+ *                       est pire qu'un controle qui s'abstient.
+ *
+ * @param session - la session porteuse.
+ * @param agents - le registre vivant, ou 'undefined'. Seul 'get' est utilise.
+ * @returns '{ verdict, parent? }'.
+ */
+export function parentVerdict(session, agents = undefined) {
+  const header = session?.header
+  if (header === null || typeof header !== 'object') return { verdict: 'no-header' }
+  const parent = header.parentSession
+  if (parent === undefined) return { verdict: 'no-parent' }
+  if (agents === null || typeof agents !== 'object' || typeof agents.get !== 'function') {
+    return { verdict: 'no-registry', parent }
+  }
+  let alive
+  try {
+    alive = agents.get(parent) !== undefined
+  } catch {
+    // Un registre qui refuse de se lire vaut un registre absent : on s'abstient.
+    return { verdict: 'no-registry', parent }
+  }
+  return { verdict: alive ? 'parent-alive' : 'parent-dead', parent }
+}
+
+/**
  * Le plancher effectif, resolu depuis la configuration de la ligne.
  *
  * Une valeur non numerique, negative ou '-0' est JOURNALISEE (dans le releve
@@ -202,24 +279,32 @@ export function resolveFloor(value) {
 /**
  * LE FILTRE, en une fonction PURE — donc testable sans disque ni session.
  *
- * Quatre portes, dans cet ordre, et chacune rend un motif distinct :
+ * Cinq portes, dans cet ordre, et chacune rend un motif distinct :
  *   1. le type : 'compaction/summary' seulement ('ignore' pour tout le reste) ;
- *   2. la RACINE : 'parentSession' absent du header ;
- *   3. le PLANCHER : assez de matiere dans 'data.summary' ;
- *   4. l'IDENTITE : un 'compactionId' utilisable (la dedup en depend).
+ *   2. l'EN-TETE : present et objet — sans lui on ne peut rien prouver ;
+ *   3. le PARENT : absent (racine), ou present SANS agent VIVANT (session
+ *      CONTINUEE) — les deux sont RETENUS ; un parent VIVANT est ecarte, et le
+ *      repli faute de registre aussi ;
+ *   4. le PLANCHER : assez de matiere dans 'data.summary' ;
+ *   5. l'IDENTITE : un 'compactionId' utilisable (la dedup en depend).
  *
  * @param session - la session porteuse, telle que 'session/event' la transmet.
  * @param event - l'evenement, tel que 'session/event' le transmet.
  * @param floor - le plancher de matiere, en caracteres.
- * @returns '{ action: "ignore" }', '{ action: "skip", counter }' ou
+ * @param agents - le registre VIVANT des agents, ou 'undefined'. Un 'skip' rendu
+ *   par le repli porte 'fallback', pour que l'appelant le journalise UNE fois.
+ * @returns '{ action: "ignore" }', '{ action: "skip", counter, fallback? }' ou
  *   '{ action: "write", record, summaryChars }'.
  */
-export function planCompaction(session, event, floor = DEFAULT_SUMMARY_FLOOR_CHARS) {
+export function planCompaction(session, event, floor = DEFAULT_SUMMARY_FLOOR_CHARS, agents = undefined) {
   if (event === null || typeof event !== 'object') return { action: 'ignore', why: 'no-event' }
   if (event.type !== 'compaction/summary') return { action: 'ignore', why: 'not-a-summary' }
   const header = session?.header
   if (header === null || typeof header !== 'object') return { action: 'skip', counter: 'skipped_no_header' }
-  if (header.parentSession !== undefined) return { action: 'skip', counter: 'skipped_child' }
+  const parent = parentVerdict(session, agents)
+  if (parent.verdict === 'no-header') return { action: 'skip', counter: 'skipped_no_header' }
+  if (parent.verdict === 'parent-alive') return { action: 'skip', counter: 'skipped_child' }
+  if (parent.verdict === 'no-registry') return { action: 'skip', counter: 'skipped_child', fallback: FILTER_FALLBACK_STEP }
   const data = event.data
   if (data === null || typeof data !== 'object') return { action: 'skip', counter: 'skipped_no_payload' }
   const summaryChars = charsOf(data.summary)
@@ -317,8 +402,10 @@ export function readSeen(journal) {
  *
  * Rien n'y est lie a cordis : les tests et la sonde le montent directement.
  *
- * @param deps - '{ home?, journalPath?, failurePath?, floorChars?, maxBytes?, seed? }'.
- * @returns le controleur : 'note', 'stats', 'errors', 'seen', 'journal', 'floor'.
+ * @param deps - '{ home?, journalPath?, failurePath?, decisionsPath?, floorChars?,
+ *   maxBytes?, seed?, agents? }'. 'agents' est le registre VIVANT, ou une FONCTION
+ *   qui le rend (la forme paresseuse : le service peut n'arriver qu'apres le montage).
+ * @returns le controleur : 'note', 'mount', 'stats', 'errors', 'seen', 'journal', 'floor'.
  */
 export function createLessons(deps = {}) {
   const home = typeof deps.home === 'string' && deps.home !== '' ? deps.home : dshHome()
@@ -328,12 +415,19 @@ export function createLessons(deps = {}) {
   const maxBytes = Number.isInteger(deps.maxBytes) && deps.maxBytes > 0 ? deps.maxBytes : lessonsMaxBytes()
   const resolved = resolveFloor(deps.floorChars)
   const floor = resolved.floor
+  // LE REGISTRE VIVANT, lu PARESSEUSEMENT : une FONCTION quand l'appelant en a
+  // une, sinon la valeur telle quelle. La ligne relit le registre a chaque
+  // evenement au lieu de le figer au montage : un registre fourni apres le montage
+  // doit etre vu, et un registre qui disparait doit redevenir un repli.
+  const registryOf = typeof deps.agents === 'function' ? deps.agents : () => deps.agents
   const seen = new Set(Array.isArray(deps.seed) ? deps.seed : readSeen(journal))
   const stats = {
     events: 0,
     summaries: 0,
     retained: 0,
     skipped_child: 0,
+    /** Les decisions prises par le REPLI, faute de registre vivant. */
+    filter_no_registry: 0,
     skipped_no_header: 0,
     skipped_no_payload: 0,
     skipped_below_floor: 0,
@@ -367,6 +461,39 @@ export function createLessons(deps = {}) {
   }
 
   /**
+   * Le registre vivant, ou 'undefined'. Cette fonction ne LEVE jamais : un registre
+   * qui refuse de se lire vaut un registre absent, et l'absence est un repli
+   * JOURNALISE — jamais une supposition.
+   */
+  function liveRegistry() {
+    try {
+      const value = registryOf()
+      return value !== null && typeof value === 'object' ? value : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Le repli n'est journalise qu'UNE fois par montage : une ligne, pas un flot. */
+  let fallbackTraced = false
+  function traceFallback() {
+    if (fallbackTraced) return
+    fallbackTraced = true
+    try {
+      appendLine(decisions, JSON.stringify({
+        at: new Date().toISOString(),
+        step: FILTER_FALLBACK_STEP,
+        filter: FILTER_ROOTS_ONLY,
+        log: journal,
+      }), maxBytes)
+    } catch (error) {
+      // Meme regle que la trace de montage : ce chemin ne peut pas faire tomber le
+      // listener, il est compte et garde en memoire.
+      contain('filter-trace', error)
+    }
+  }
+
+  /**
    * LE LISTENER, corps entier. Aucun chemin ne leve — ni un disque plein, ni un
    * chemin invalide, ni un JSON imprevu, ni une charge utile absente.
    *
@@ -376,11 +503,15 @@ export function createLessons(deps = {}) {
   function note(session, event) {
     try {
       stats.events++
-      const plan = planCompaction(session, event, floor)
+      const plan = planCompaction(session, event, floor, liveRegistry())
       if (plan.action === 'ignore') return null
       stats.summaries++
       if (plan.action === 'skip') {
         stats[plan.counter]++
+        if (plan.fallback !== undefined) {
+          stats.filter_no_registry++
+          traceFallback()
+        }
         return null
       }
       const record = plan.record
@@ -437,7 +568,18 @@ export function createLessons(deps = {}) {
    * ('mount_failed') et garde en memoire. Aucun chemin ne remonte.
    */
   function mount() {
-    const entry = { at: new Date().toISOString(), step: 'mounted', floor, reseeded: seen.size, log: journal }
+    const entry = {
+      at: new Date().toISOString(),
+      step: 'mounted',
+      floor,
+      reseeded: seen.size,
+      // LE MODE RETENU, ecrit AU MONTAGE : sans lui, un journal vide ne dit pas si
+      // la ligne filtre sur le registre vivant ou si elle est retombee sur le
+      // comportement d'hier. Un controle qui ne se declenche pas ressemble a un
+      // controle qui passe.
+      filter: liveRegistry() === undefined ? FILTER_ROOTS_ONLY : FILTER_PARENT_LIVENESS,
+      log: journal,
+    }
     try {
       appendLine(decisions, JSON.stringify(entry), maxBytes)
     } catch (error) {
@@ -454,9 +596,14 @@ export function createLessons(deps = {}) {
  * Monte la ligne.
  *
  * LIGNE HOTE, listener SANS TAG : c'est ce qui la fait voir les racines ET les
- * enfants sans plomberie ('dsh-scope/lib/index.js:329-335'). Elle ne declare
- * AUCUNE injection : elle ne lit aucun service, donc rien ne peut retarder son
- * montage ni le faire echouer sur un service absent.
+ * enfants sans plomberie ('dsh-scope/lib/index.js:329-335').
+ *
+ * Elle DECLARE une injection, 'agents' (voir 'inject' ci-dessus) : la ligne attend
+ * donc le registre vivant AVANT de se monter, et aucune compaction ne peut etre
+ * classee dans la fenetre ou ce registre n'existe pas encore. La LECTURE, elle,
+ * reste paresseuse et non lancante : montee sans registre — tests, sonde,
+ * composition qui ne fournit pas 'agents' — la ligne ne tombe pas, elle retombe
+ * sur le comportement d'hier et l'ECRIT ('filter-no-registry').
  *
  * @param ctx - le contexte de la ligne.
  * @param config - '{ home?, summaryFloorChars?, maxBytes? }'.
@@ -467,6 +614,19 @@ export function apply(ctx, config = {}) {
     home: config.home,
     floorChars: config.summaryFloorChars,
     maxBytes: config.maxBytes,
+    // LA LECTURE DU REGISTRE, paresseuse et non lancante. 'ctx.get' et non
+    // 'ctx.agents' : une lecture non declaree LEVE (mesure « cannot get property
+    // "agents" without inject »), et cette lecture doit pouvoir repondre « pas de
+    // service ici » plutot que faire tomber le listener — qui est SYNCHRONE et ne
+    // peut pas lever. Le repli est journalise, jamais silencieux.
+    agents: () => {
+      try {
+        if (typeof ctx.get === 'function') return ctx.get('agents')
+        return ctx.agents
+      } catch {
+        return undefined
+      }
+    },
   })
   // Le listener est SYNCHRONE et rend toujours la main : 'Session.append' n'attend
   // jamais, et une promesse rejetee ne serait vue qu'apres le tour.

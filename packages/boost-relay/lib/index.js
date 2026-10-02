@@ -254,7 +254,14 @@ function headers() {
  * The root session an owner belongs to, by walking `parentSession` upwards.
  *
  * Bounded to 16 hops: a cycle in a malformed store must not hang a host plugin.
- * @returns the root session id, or undefined when the owner is unknown.
+ *
+ * The walk STOPS where the store stops. When the parent's header is missing it returns that
+ * parent's ID, which the headers know nothing about — neither alive nor dead. That return is
+ * kept (it is the only clue the store leaves), and it is exactly why this walk is no longer
+ * the whole resolution: `chainOf` carries that id to the LIVE registry, which confirms it or
+ * discards it. An id nothing describes is never handed a notice (see `deliver`, step 3).
+ *
+ * @returns the root session id, the last readable link's parent id, or undefined.
  */
 function rootOf(ownerId) {
   const byId = headers()
@@ -268,6 +275,50 @@ function rootOf(ownerId) {
     current = next
   }
   return current.id
+}
+
+/**
+ * The parent chain of `ownerId`, from the session ITSELF up to its durable root.
+ *
+ * Bounded to 16 hops, exactly like `rootOf`, whose answer is this chain's LAST element: the
+ * two can never disagree about where a chain ends. The chain is what the live fallback walks,
+ * and it is read from the headers for the reason `rootOf` is — the headers answered correctly
+ * every time they were asked, while `ctx.agents.list()` returned `[]` at mount AND at
+ * settlement in one measured process, and `subagents.listDescendants()` never sees a FORKED
+ * session at all.
+ *
+ * A parent whose header is missing is CARRIED by its bare id (`{ id: parent }`) rather than
+ * dropped: that unreadable link is precisely the one the live registry can still confirm, and
+ * dropping it would abandon a live ancestor the store cannot describe.
+ *
+ * @returns the ids, caller first and root last; `[]` when the store does not know the owner.
+ */
+function chainOf(ownerId) {
+  const byId = headers()
+  let current = byId.get(ownerId)
+  if (current === undefined) return []
+  const chain = [current.id]
+  for (let hop = 0; hop < 16; hop++) {
+    const parent = current.parentSession
+    if (parent === undefined || parent === null) return chain
+    current = byId.get(parent) ?? { id: parent }
+    chain.push(current.id)
+  }
+  return chain
+}
+
+/**
+ * The line's LIVE agent registry, or undefined when the line did not receive one.
+ *
+ * `inject` declares `agents` (line 46), so a healthy mount always has it. A service that is
+ * absent must DEGRADE, never fail: the resolution then keeps the durable headers alone,
+ * journals the degradation, and delivers nothing rather than guessing at a live handle.
+ */
+function liveAgents(ctx) {
+  const agents = ctx?.agents
+  return agents !== null && typeof agents === 'object' && typeof agents.get === 'function'
+    ? agents
+    : undefined
 }
 
 export function apply(ctx) {
@@ -362,7 +413,9 @@ export function apply(ctx) {
     // in the relay's own decision log. A duplicate notice for the worker costs one
     // line; a lost notice costs the parent the whole result. Deduplication and the
     // wake budget already bound the cost.
-    const owner = ctx.agents.get(ownerId)
+    // The live state of the job's OWNER, measured when the registry can answer and 'absent'
+    // when the line received no registry at all (the degradation path must not throw here).
+    const owner = liveAgents(ctx)?.get(ownerId)
     const ownerState = owner === undefined ? 'absent' : owner.status
     trace(state, { step: 'settled', job: job.id, owner: short(ownerId), cause: event.cause ?? 'normal', ownerState })
     void deliver(job, ownerId, event.cause, ownerState, teardown)
@@ -407,7 +460,7 @@ export function apply(ctx) {
   } catch (error) {
     trace(state, { step: 'subscribe-failed', filter: 'all', error: String(error?.message ?? error) })
   }
-  for (const agent of ctx.agents.list()) {
+  for (const agent of liveAgents(ctx)?.list() ?? []) {
     const id = agent.session?.id
     if (typeof id === 'string') subscribeOwner(id)
   }
@@ -447,29 +500,92 @@ export function apply(ctx) {
     //     lookup still reported no descendant.
     // The session header answered correctly every single time, so the parent chain
     // is walked there. The live handle is then fetched by id, which does work.
-    const rootId = rootOf(ownerId)
-    const liveCount = ctx.agents.list().length
+    //
+    // The headers are step 1 below and stay the PATH; the live registry is step 3 and only
+    // ARBITRATES a root the headers returned but that is no longer alive. A device that walked
+    // the durable chain all the way to a DEAD session addressed its notices to an agent that no
+    // longer existed — the shape of a session CONTINUED after a restart, whose parent (the
+    // previous process's session) can never come back.
+    // Step 1 — the DURABLE HEADERS resolve the root. Unchanged, and still the path.
+    const headerRoot = rootOf(ownerId)
+    const agents = liveAgents(ctx)
+    const liveCount = agents === undefined ? 0 : agents.list().length
     trace(state, {
       step: 'resolve',
       job: job.id,
       owner: short(ownerId),
       ownerState,
-      rootId: rootId === undefined ? null : short(rootId),
+      rootId: headerRoot === undefined ? null : short(headerRoot),
       liveCount,
-      durable: rootId !== undefined,
+      durable: headerRoot !== undefined,
     })
-    if (rootId === undefined) {
+    if (headerRoot === undefined) {
       state.skipped++
       return trace(state, { step: 'bail', why: 'owner-absent-from-session-store', job: job.id, owner: short(ownerId) })
     }
-    const root = ctx.agents.get(rootId)
+    if (agents === undefined) {
+      // Degraded, and JOURNALLED as such: with no live registry the root cannot be confirmed,
+      // so step 3 runs on the headers alone and no handle can be fetched at all. The relay says
+      // so rather than letting the degradation pass for a normal resolution.
+      trace(state, { step: 'degrade', why: 'agents-service-absent', job: job.id, owner: short(ownerId) })
+    }
+    // Step 2 — the agent of that root is CONFIRMED LIVE: the owner IS that root. Unchanged, and
+    // the only path a healthy tree ever takes.
+    let ownerRootId = headerRoot
+    let fallback = false
+    let root = agents === undefined ? undefined : agents.get(headerRoot)
+    if (root === undefined) {
+      // Step 3 — the root the headers returned is GONE. That is the shape of a session
+      // CONTINUED after a restart: a seeded fork (`isSeeded: true`, `delegationDepth: 0`) whose
+      // parent is the session of the previous process, which will never come back. Resolution
+      // by headers alone then addresses the notice to a dead session, and the live parent — the
+      // only agent that can act on the output — is told nothing.
+      //
+      // The owner becomes the HIGHEST LIVE ANCESTOR of the chain, or this owner itself when
+      // nothing above it is alive. The live registry ARBITRATES that choice; it never resolves
+      // the chain, and it is asked PER CHAIN ID (`agents.get`) rather than through
+      // `agents.list()`, which returned `[]` at mount AND at settlement in one measured
+      // process while a lookup by id did work.
+      fallback = true
+      const chain = chainOf(ownerId)
+      // Highest first: the chain is caller-first, so the last live element is the closest to
+      // the root — which is the session that owns the tree.
+      for (let index = chain.length - 1; index >= 0; index--) {
+        const candidate = agents === undefined ? undefined : agents.get(chain[index])
+        if (candidate === undefined) continue
+        ownerRootId = chain[index]
+        root = candidate
+        break
+      }
+      // Nothing on the chain answers: the rule keeps the owner itself. `liveOwner` below is then
+      // the id RETAINED, not a liveness measurement, and the bail underneath says why nothing was
+      // delivered — the record never claims more than was measured.
+      if (root === undefined) ownerRootId = ownerId
+      trace(state, {
+        step: 'owner-fallback',
+        job: job.id,
+        owner: short(ownerId),
+        headerRoot: short(headerRoot),
+        liveOwner: short(ownerRootId),
+      })
+    }
     if (root === undefined) {
       state.skipped++
-      return trace(state, { step: 'bail', why: 'no-live-handle-for-root', job: job.id, root: short(rootId), liveCount })
+      return trace(state, {
+        step: 'bail',
+        why: agents === undefined ? 'agents-service-absent' : 'no-live-handle-for-owner',
+        job: job.id,
+        root: short(ownerRootId),
+        liveCount,
+      })
     }
-    if (rootId === ownerId) {
+    // The fence covers a LIVE durable root only: that root started the job itself and receives
+    // the settlement natively, so relaying it back would be a duplicate. A fallback owner is NOT
+    // that case — it is the highest live ancestor of a chain whose root is dead, and it is the
+    // only agent that will ever learn what the job produced.
+    if (!fallback && ownerRootId === ownerId) {
       state.skipped++
-      return trace(state, { step: 'bail', why: 'owner-is-the-root', job: job.id, root: short(rootId) })
+      return trace(state, { step: 'bail', why: 'owner-is-the-root', job: job.id, root: short(ownerRootId) })
     }
     {
       const entry = headers().get(ownerId)
@@ -478,18 +594,18 @@ export function apply(ctx) {
         content: [{ type: 'text', text: notice(job, entry, cause, ownerState, teardown) }],
         source: { kind: 'tool-jobs', form: 'notice', summary: `relay ${job.id}` },
       })
-      const spent = wakes.get(rootId) ?? 0
+      const spent = wakes.get(ownerRootId) ?? 0
       if (root.status === 'idle' && spent < MAX_WAKES_PER_ROOT) {
-        wakes.set(rootId, spent + 1)
+        wakes.set(ownerRootId, spent + 1)
         state.wakes++
         root.followup(message)
-        state.last = `${job.id} → réveil de ${short(rootId)}`
+        state.last = `${job.id} → réveil de ${short(ownerRootId)}`
       } else {
         root.inject(message)
-        state.last = `${job.id} → injection dans ${short(rootId)}`
+        state.last = `${job.id} → injection dans ${short(ownerRootId)}`
       }
       state.relays++
-      trace(state, { step: 'relayed', job: job.id, owner: short(ownerId), root: short(rootId), via: root.status === 'idle' ? 'wake' : 'inject' })
+      trace(state, { step: 'relayed', job: job.id, owner: short(ownerId), root: short(ownerRootId), via: root.status === 'idle' ? 'wake' : 'inject' })
       return
     }
   }

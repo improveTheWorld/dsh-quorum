@@ -68,6 +68,13 @@ function journalLines(home) {
 }
 const threw = (records) => records.filter((record) => String(record.args?.[0]).includes('listener threw'))
 
+/** Les lignes du journal de diagnostics du paquet (montage, repli), deja parsees. */
+const decisionsLines = (home) => {
+  const file = join(home, 'plugin-data', 'dsh-boost-lessons', 'decisions.jsonl')
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8').split('\n').filter((line) => line !== '').map((line) => JSON.parse(line))
+}
+
 async function main() {
   for (const [label, file] of Object.entries(entries)) {
     if (!existsSync(file)) throw new Error('le module ' + label + ' n est pas installe ici : ' + file)
@@ -115,6 +122,10 @@ async function main() {
   check('0.deux: la trace porte le plancher effectif, reseeded et le journal observe',
     trace.step === 'mounted' && trace.floor === plugin.DEFAULT_SUMMARY_FLOOR_CHARS && trace.reseeded === 0 && trace.log === journalFile(scratch),
     JSON.stringify(trace))
+  // Le MODE de filtrage est ecrit au montage : sans lui, un journal vide ne dit pas
+  // si la ligne filtre sur le registre vivant ou si elle est retombee sur hier.
+  check('0.trois: la trace nomme le mode de filtrage retenu',
+    trace.filter === plugin.FILTER_ROOTS_ONLY, 'filter=' + String(trace.filter))
 
   const createRoot = (id) => root.sessions.create(id, { meta: { cwd: process.cwd() } })
   const createChild = (id) => root.sessions.create(id, {
@@ -139,6 +150,11 @@ async function main() {
   // Le temoin : la meme matiere sur une racine ECRIT — sinon « rien » ne prouve rien.
   createRoot('session-probe-temoin').append('compaction/summary', payload('temoin-racine', 9_000))
   check('2.deux: le temoin de racine ecrit, lui', journalLines(scratch).length === 2, 'lignes=' + journalLines(scratch).length)
+  // Sans registre, l'enfant a ete ecarte par le REPLI : il doit l'avoir DIT.
+  const replis = decisionsLines(scratch).filter((line) => line.step === plugin.FILTER_FALLBACK_STEP)
+  check('2.trois: sans registre, le repli est JOURNALISE une fois',
+    replis.length === 1 && replis[0].filter === plugin.FILTER_ROOTS_ONLY,
+    'lignes=' + replis.length + ' ' + JSON.stringify(replis[0] ?? null))
 
   // ---- 3. le meme compactionId (le fork) ------------------------------------
   createRoot('session-probe-fork').append('compaction/summary', payload('8073f4c0-dbc9-4c4b-b86e-26a6a9175037', 11_786))
@@ -239,6 +255,56 @@ async function main() {
   check('7.un: le controle de vivacite est VU par le meme exportateur', seen.length === 1, 'alertes=' + seen.length)
   if (seen.length > 0) console.log('PROBE-RAW-LOGGER: ' + String(seen[0].args?.[0]))
 
+  // ---- 8. LA SESSION CONTINUEE — le cas qui a tout casse ---------------------
+  // Application et journal NEUFS, et le registre VIVANT fourni AVANT le montage :
+  // sur 'root', le second montage de 6c partage le meme journal et reecrirait la
+  // MEME ligne (la dedup est par montage, pas par fichier), donc un ecart de
+  // comptage pris la-bas ne prouverait rien.
+  //
+  // 'session-probe-root' est VIVANT ; 'session-018354d9' est MORT — la session
+  // d'avant le redemarrage, dont descend la session reprise.
+  //
+  // La session reprise passe par la VRAIE porte du magasin, elle n'est pas ecrite a
+  // la main : le magasin REFUSE 'isSeeded' sans germe explicite (mesure : « seeded
+  // session requires an explicit constructor seed »), donc elle porte un germe
+  // contigu ('turn/start', seq 0) et son compte d'heritage — et son en-tete dit
+  // alors 'isSeeded: true', 'delegationDepth: 0' et le parent MORT.
+  const vivant = mkdtempSync(join(tmpdir(), 'dsh-lessons-vivant-'))
+  const root4 = new Context()
+  await root4.plugin(SessionStore)
+  root4.provide('agents', {
+    get: (id) => (id === 'session-probe-root' ? { session: { id } } : undefined),
+    list: () => ['session-probe-root'],
+  })
+  let controller4
+  await root4.plugin({ name: plugin.name, apply: (ctx, config) => { controller4 = plugin.apply(ctx, config) } }, { home: vivant })
+  const traceVivante = decisionsLines(vivant)[0] ?? {}
+  check('8.un: registre vivant des le montage -> la trace nomme « parent-liveness »',
+    traceVivante.filter === plugin.FILTER_PARENT_LIVENESS, 'filter=' + String(traceVivante.filter))
+
+  const continuee = root4.sessions.create('session-probe-continuee', {
+    seed: [{ type: 'turn/start', seq: 0, time: Date.now(), data: { turn: 1 } }],
+    inheritedEventCount: 1,
+    meta: { cwd: process.cwd(), isSeeded: true, parentSession: 'session-018354d9-73b1-42af-97c7-f732a2dcb3b5', delegationDepth: 0 },
+  })
+  say('continuee-header', JSON.stringify(continuee.header))
+  const before8 = journalLines(vivant).length
+  root4.sessions.create('session-probe-enfant-vivant', {
+    meta: { cwd: process.cwd(), parentSession: 'session-probe-root', delegationDepth: 0, origin: 'subagent' },
+  }).append('compaction/summary', payload('enfant-parent-vivant', 9_000))
+  check('8.deux: un enfant dont le parent est VIVANT n ecrit RIEN',
+    journalLines(vivant).length === before8, 'lignes=' + journalLines(vivant).length)
+
+  continuee.append('compaction/summary', payload('continuee-parent-mort', 9_000))
+  const after8 = journalLines(vivant)
+  check('8.trois: une session CONTINUEE (parent MORT) ECRIT, elle',
+    after8.length === before8 + 1, 'lignes=' + after8.length + ' avant=' + before8)
+  check('8.quatre: la ligne retenue est bien celle de la session continuee',
+    String(after8[after8.length - 1] ?? '').includes('session-probe-continuee'),
+    String(after8[after8.length - 1] ?? '<aucune ligne>'))
+  say('stats-continuee', JSON.stringify(controller4.stats))
+  console.log('PROBE-RAW-JOURNAL-CONTINUEE: ' + (after8[after8.length - 1] ?? '<aucune ligne>'))
+
   // ---- la preuve brute, a la fin --------------------------------------------
   console.log('PROBE-RAW-JOURNAL-FINAL:')
   const final = journalLines(scratch)
@@ -254,7 +320,8 @@ async function main() {
   }
   console.log('PROBE-PASS — les mesures concordent : une racine ecrit, un enfant non, le fork ne double pas,')
   console.log('             le plancher tient, l imprevu ne leve pas, le journal inecrivable ne propage RIEN,')
-  console.log('             et le controle de vivacite prouve que l absence d alerte veut dire quelque chose.')
+  console.log('             le controle de vivacite prouve que l absence d alerte veut dire quelque chose,')
+  console.log('             et une session CONTINUEE (parent MORT) est RETENUE quand son parent VIVANT fait taire l enfant.')
 }
 
 await main()

@@ -29,7 +29,15 @@
 //   T-L7   la rotation garde une generation, et un re-montage se re-amorce depuis
 //          les DEUX — la lecture qui n'en lit qu'une perd des ids et reecrit ;
 //   T-L8   le plancher est CONFIGURABLE, et une valeur invalide retombe sur le
-//          defaut sans casser le montage.
+//          defaut sans casser le montage ;
+//   T-T1   une RACINE (aucun parent) est RETENUE, registre vivant ou pas ;
+//   T-T2   un parent VIVANT fait ECARTER son enfant (la recursion) ;
+//   T-T3   un parent MORT fait RETENIR la session — LA SESSION CONTINUEE, le cas
+//          qui a tout casse et qu'aucun cas ne couvrait ;
+//   T-T4   SANS service 'agents', le comportement d'hier tient (les enfants sont
+//          ecartes) ET le repli est JOURNALISE ('filter-no-registry'), une fois ;
+//   T-T5   la trace de montage fonctionne toujours, et nomme le MODE de filtrage
+//          retenu ('parent-liveness' avec registre, 'roots-only' sans).
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -38,12 +46,16 @@ import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import {
   DEFAULT_SUMMARY_FLOOR_CHARS,
+  FILTER_FALLBACK_STEP,
+  FILTER_PARENT_LIVENESS,
+  FILTER_ROOTS_ONLY,
   REASON_RETAINED,
   apply,
   charsOf,
   isRootSession,
   journalPath,
   lessonsMaxBytes,
+  parentVerdict,
   planCompaction,
   readSeen,
   textOf,
@@ -88,6 +100,13 @@ function harness(options = {}) {
     provide: (serviceName, value) => {
       provided = { serviceName, value }
     },
+    // LE REGISTRE VIVANT : le meme acces que 'apply' fait en production
+    // ('ctx.get', jamais une propriete devinee). 'options.agents' est soit le
+    // registre, soit une FONCTION qui le rend — la forme qui permet d'en fournir
+    // un APRES le montage et de verifier que la ligne ne fige pas son repli.
+    get: (serviceName) => (serviceName === 'agents'
+      ? (typeof options.agents === 'function' ? options.agents() : options.agents)
+      : undefined),
   }
   const controller = apply(ctx, { home: dir, ...options.config })
   return {
@@ -116,6 +135,30 @@ function childSession(id = 'session-child') {
     id,
     header: { version: 4, id, createdAt: 0, cwd: process.cwd(), isSeeded: false, parentSession: 'session-root', delegationDepth: 0, origin: 'subagent' },
   }
+}
+
+/**
+ * LA SESSION CONTINUEE — le cas qui a tout casse, dans sa forme MESUREE : un fork
+ * seede ('isSeeded: true', 'delegationDepth: 0') dont le parent n'est PLUS VIVANT
+ * (journal du relais, 2026-10-02 19:31 et 19:34 : 'register-skipped', 'why:
+ * root-agent-unknown', id '7fa9e670', root '018354d9' — la session d'avant le
+ * redemarrage). Son en-tete PORTE 'parentSession', donc un filtre par
+ * 'parentSession === undefined' la prend pour un enfant et l'ignore.
+ */
+function continuedSession(id = 'session-continuee', deadParent = 'session-morte') {
+  return {
+    id,
+    header: { version: 4, id, createdAt: 0, cwd: process.cwd(), isSeeded: true, parentSession: deadParent, delegationDepth: 0 },
+  }
+}
+
+/**
+ * Le REGISTRE VIVANT : les ids cites y sont vivants, tous les autres sont morts.
+ * C'est la seule chose que le filtre lui demande.
+ */
+function liveAgents(...ids) {
+  const alive = new Set(ids)
+  return { get: (id) => (alive.has(id) ? { session: { id } } : undefined), list: () => [...alive] }
 }
 
 /** La charge utile REELLE d'une compaction, telle que le corpus la porte. */
@@ -486,6 +529,126 @@ test('T-L8 : le plancher est configurable, et une valeur invalide retombe sur le
   assert.equal(planCompaction(rootSession(), summaryEvent({ summary: 'court' })).counter, 'skipped_below_floor')
   assert.equal(planCompaction(rootSession(), summaryEvent({ compactionId: undefined })).counter, 'skipped_no_id')
   assert.equal(planCompaction(rootSession(), summaryEvent()).action, 'write')
+})
+
+// --------------------------------------------------------------------------- //
+// T-T1 .. T-T5 — le filtre « cette session n a pas de parent VIVANT »           //
+// --------------------------------------------------------------------------- //
+//
+// Le filtre d'hier etait 'session.header.parentSession === undefined' : RACINES
+// SEULEMENT. Il fermait la recursion, mais il IGNORAIT la session CONTINUEE — un
+// fork seede dont le parent est mort — et c'est exactement la mesure que
+// l'utilisateur attend : sa propre frequence. Le filtre demande desormais au
+// registre VIVANT ; sans registre il s'abstient et journalise son repli.
+
+test('T-T1 : racine (aucun parent) -> RETENUE, registre vivant ou pas', () => {
+  // Avec un registre : la racine n'a pas de parent a y chercher, donc elle passe.
+  const avec = harness({ agents: liveAgents('session-autre') })
+  avec.fire(rootSession('session-racine-avec'), summaryEvent({ compactionId: 'racine-avec' }))
+  assert.deepEqual(rowsOf(avec.dir).map((row) => row.compactionId), ['racine-avec'],
+    'une racine doit etre RETENUE meme quand un registre vivant est disponible')
+  assert.equal(avec.controller.stats.retained, 1)
+
+  // Sans registre : comportement d'hier, inchange.
+  const sans = harness()
+  sans.fire(rootSession('session-racine-sans'), summaryEvent({ compactionId: 'racine-sans' }))
+  assert.deepEqual(rowsOf(sans.dir).map((row) => row.compactionId), ['racine-sans'],
+    'une racine doit etre RETENUE sans registre aussi')
+  assert.equal(sans.controller.stats.retained, 1)
+})
+
+test('T-T2 : parent VIVANT -> ECARTEE (la recursion, non-regression)', () => {
+  // Le parent EST dans le registre : c'est un enfant, sa compaction se tait.
+  const h = harness({ agents: liveAgents('session-root') })
+  h.fire(childSession(), summaryEvent({ compactionId: 'enfant-parent-vivant' }))
+
+  assert.deepEqual(rowsOf(h.dir), [], 'un enfant dont le parent est VIVANT ne doit rien ecrire')
+  assert.equal(h.controller.stats.skipped_child, 1)
+  assert.equal(h.controller.stats.filter_no_registry, 0, 'le registre etait la : aucun repli')
+
+  // LE TEMOIN : la meme matiere, sur une racine, ECRIT — sinon « aucune ligne » ne
+  // prouve rien.
+  h.fire(rootSession('session-temoin-t2'), summaryEvent({ compactionId: 'temoin-t2' }))
+  assert.equal(rowsOf(h.dir).length, 1, 'le temoin de racine doit ecrire : sinon le cas ne prouve rien')
+})
+
+test('T-T3 : parent MORT -> RETENUE (la session continuee : le cas manquant)', () => {
+  // Le registre ne connait PAS 'session-morte-018354d9' : c'est la session d'avant
+  // le redemarrage. La session reprise est donc la plus haute vivante de sa chaine.
+  // 'session-root' est VIVANT — c'est le parent de l'enfant temoin juste apres.
+  const h = harness({ agents: liveAgents('session-root') })
+  h.fire(continuedSession('session-continuee', 'session-morte-018354d9'), summaryEvent({ compactionId: 'continuee-parent-mort' }))
+
+  const rows = rowsOf(h.dir)
+  assert.equal(rows.length, 1, 'une session CONTINUEE doit etre RETENUE : son parent n est plus vivant')
+  assert.equal(rows[0].session, 'session-continuee')
+  assert.equal(rows[0].compactionId, 'continuee-parent-mort')
+  assert.equal(rows[0].reason, REASON_RETAINED)
+  assert.equal(h.controller.stats.retained, 1)
+
+  // LE TEMOIN, dans le MEME montage : l'enfant d'un parent VIVANT se tait toujours.
+  h.fire(childSession('session-enfant-t3'), summaryEvent({ compactionId: 'enfant-t3' }))
+  assert.equal(rowsOf(h.dir).length, 1, 'le parent VIVANT doit toujours faire taire son enfant')
+  assert.equal(h.controller.stats.skipped_child, 1)
+
+  // Le VERDICT pur, sans disque : c'est la decision, pas l'ecriture, qui est testee.
+  assert.deepEqual(parentVerdict(continuedSession(), liveAgents('session-parent-vivant')),
+    { verdict: 'parent-dead', parent: 'session-morte' })
+  assert.equal(parentVerdict(childSession(), liveAgents('session-root')).verdict, 'parent-alive')
+  assert.equal(parentVerdict(rootSession(), liveAgents('session-root')).verdict, 'no-parent')
+})
+
+test('T-T4 : sans service agents, le comportement d hier tient ET le repli est JOURNALISE', () => {
+  // 'registry' reste 'undefined' au montage : la ligne est montee SANS registre.
+  let registry
+  const h = harness({ agents: () => registry })
+  assert.equal(decisionLines(h.dir)[0].filter, FILTER_ROOTS_ONLY, 'sans registre, le montage le DIT')
+
+  h.fire(childSession(), summaryEvent({ compactionId: 'enfant-sans-registre' }))
+  assert.deepEqual(rowsOf(h.dir), [], 'sans registre on ne peut pas savoir : l enfant est ecarte, comme hier')
+  assert.equal(h.controller.stats.skipped_child, 1)
+  assert.equal(h.controller.stats.filter_no_registry, 1, 'le repli est COMPTE, pas avale')
+
+  const replis = () => decisionLines(h.dir).filter((line) => line.step === FILTER_FALLBACK_STEP)
+  assert.equal(replis().length, 1, 'le repli doit etre JOURNALISE — un controle muet ressemble a un controle qui passe')
+  assert.equal(replis()[0].filter, FILTER_ROOTS_ONLY)
+  assert.equal(replis()[0].log, journalOf(h.dir))
+  assert.ok(!Number.isNaN(Date.parse(replis()[0].at)), 'at doit etre une date ISO : ' + replis()[0].at)
+
+  // UNE ligne, pas un flot : deux decisions de repli, un seul enregistrement.
+  h.fire(childSession('session-enfant-sans-registre-2'), summaryEvent({ compactionId: 'enfant-sans-registre-2' }))
+  assert.equal(h.controller.stats.filter_no_registry, 2)
+  assert.equal(replis().length, 1, 'le repli se journalise une fois par montage')
+
+  // ET LE REPLI N'EST PAS UNE CONDAMNATION : le registre qui arrive APRES le
+  // montage est vu, parce que la ligne relit le service a chaque evenement.
+  registry = liveAgents('session-root')
+  h.fire(continuedSession('session-continuee-t4', 'session-morte-t4'), summaryEvent({ compactionId: 'continuee-t4' }))
+  assert.deepEqual(rowsOf(h.dir).map((row) => row.compactionId), ['continuee-t4'],
+    'un registre fourni apres le montage doit etre vu : la ligne ne fige pas son repli')
+  assert.equal(h.controller.stats.filter_no_registry, 2, 'plus aucun repli une fois le registre la')
+})
+
+test('T-T5 : la trace de montage fonctionne toujours, et nomme le mode de filtrage retenu', () => {
+  // Sans registre : le mode retenu est le repli, et il est ECRIT.
+  const sans = harness()
+  const traceSans = decisionLines(sans.dir)
+  assert.equal(traceSans.length, 1, 'le montage laisse UNE ligne, et une seule')
+  assert.equal(traceSans[0].step, 'mounted')
+  assert.equal(traceSans[0].filter, FILTER_ROOTS_ONLY, 'sans registre, la trace dit « racines seulement »')
+  assert.equal(traceSans[0].floor, DEFAULT_SUMMARY_FLOOR_CHARS, 'le plancher EFFECTIF, inchange')
+  assert.equal(traceSans[0].reseeded, 0)
+  assert.equal(traceSans[0].log, journalOf(sans.dir))
+
+  // Avec registre : le mode retenu est la vivacite du parent.
+  const avec = harness({ agents: liveAgents('session-root') })
+  const traceAvec = decisionLines(avec.dir)
+  assert.equal(traceAvec.length, 1)
+  assert.equal(traceAvec[0].step, 'mounted')
+  assert.equal(traceAvec[0].filter, FILTER_PARENT_LIVENESS, 'avec registre, la trace nomme le mode qui filtre')
+  // Ecrite AU MONTAGE : aucun evenement n'a encore ete vu.
+  assert.equal(avec.controller.stats.events, 0)
+  assert.equal(traceAvec[0].reseeded, 0)
 })
 
 // --------------------------------------------------------------------------- //

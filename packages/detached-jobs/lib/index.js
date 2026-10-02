@@ -33,6 +33,21 @@
  * replays for an agent that pre-existed the mount, and `listDescendants` walks the
  * delegated-child catalog only, so it cannot see a forked session.
  *
+ * That walk stays the resolution — but a session CONTINUED after a restart is a seeded
+ * fork whose parent is the session of the PREVIOUS process, so the root the headers
+ * return is a session that will never come back. Measured, journal of the relay:
+ *
+ *   {"step":"register-skipped","why":"root-agent-unknown","id":"7fa9e670","root":"018354d9"}
+ *   {"step":"register-skipped","why":"root-agent-unknown","id":"00ce339d","root":"018354d9"}
+ *
+ * `7fa9e670` is the continued session, `00ce339d` the child it had just created, and
+ * `018354d9` the dead session both descend from — so `run_detached` was refused at the
+ * root itself. When the header root has no agent, the owner is therefore the HIGHEST
+ * LIVING ANCESTOR of the chain, or the caller itself when it is the only live one; the
+ * live registry is consulted ONCE to arbitrate that choice, never to resolve it. The
+ * fallback is journalled (`owner-fallback`), because a silent one would be
+ * indistinguishable from a normal resolution (`resolveOwner`, below).
+ *
  * The result is not a workaround: the job survives, the root owns it so it can
  * read the output itself, and the root receives the ordinary job settlement
  * notice — no relay, no notice, no rule to remember.
@@ -127,19 +142,37 @@ function headers() {
 }
 
 /**
+ * The parent chain of `sessionId`, from the session ITSELF up to its durable root.
+ *
+ * Bounded to 16 hops, exactly like `rootOf` — which is the LAST element of this chain, so a
+ * malformed store cannot hang the host and the two can never disagree about where a chain
+ * ends. The chain is what the owner fallback walks, and it is read from the headers for the
+ * reason `rootOf` is: they answered correctly every time they were asked.
+ *
+ * @param sessionId - the session to walk from.
+ * @returns the ids, caller first and root last; `[]` when the store does not know the session.
+ */
+function chainOf(sessionId) {
+  const byId = headers()
+  let current = byId.get(sessionId)
+  if (current === undefined) return []
+  const chain = [current.id]
+  for (let hop = 0; hop < 16; hop++) {
+    const parent = current.parentSession
+    if (parent === undefined || parent === null) return chain
+    current = byId.get(parent) ?? { id: parent }
+    chain.push(current.id)
+  }
+  return chain
+}
+
+/**
  * The root session of `sessionId`, by walking `parentSession` upwards.
  * Bounded to 16 hops so a malformed store cannot hang the host.
  */
 export function rootOf(sessionId) {
-  const byId = headers()
-  let current = byId.get(sessionId)
-  if (current === undefined) return undefined
-  for (let hop = 0; hop < 16; hop++) {
-    const parent = current.parentSession
-    if (parent === undefined || parent === null) return current.id
-    current = byId.get(parent) ?? { id: parent }
-  }
-  return current.id
+  const chain = chainOf(sessionId)
+  return chain.length === 0 ? undefined : chain[chain.length - 1]
 }
 
 /**
@@ -774,7 +807,7 @@ export function apply(ctx, config) {
           additionalProperties: false,
           properties: {
             job_id: { type: 'string', description: 'Id of the job that was started.' },
-            owner: { type: 'string', description: 'Session that owns the job — the root, never the caller.' },
+            owner: { type: 'string', description: 'Session that owns the job — the chain root, or its highest living ancestor.' },
             text: { type: 'string', description: 'Model-facing summary.' },
           },
           required: ['job_id', 'owner', 'text'],
@@ -783,10 +816,16 @@ export function apply(ctx, config) {
       },
       execute: async (args, exec) => {
         const caller = exec?.agent?.session?.id
-        const rootId = caller === undefined ? undefined : rootOf(caller)
-        if (rootId === undefined) {
-          throw new Error('run_detached: could not resolve the session root from the durable session headers, '
-            + 'so the job was not started. Refusing to start a job whose owner would be wrong.')
+        // The SAME resolution the owner gate uses — one rule, never two. A tool admitted
+        // because its owner is alive, starting its job in the name of a dead session, would be
+        // the very defect this module removes, one layer lower: `jobs.start` accepts the spec,
+        // and `job_output` is then fenced to a session that no longer exists.
+        const resolution = caller === undefined ? undefined : resolveOwner(caller)
+        const ownerId = resolution?.owner
+        if (ownerId === undefined) {
+          throw new Error('run_detached: could not resolve the session root from the durable session headers — '
+            + 'and no live agent of that chain — so the job was not started. Refusing to start a job whose '
+            + 'owner would be wrong.')
         }
         // No fallback to this scope's own service, deliberately.
         //
@@ -827,7 +866,7 @@ export function apply(ctx, config) {
           kind: 'pwsh',
           label,
           // The whole point: the ROOT owns it, so the worker's disposal cannot cancel it.
-          owner: rootId,
+          owner: ownerId,
           output: [recoverySource],
           // The shell is resolved at CALL time, never captured: a configured `pwshPath` is
           // a live getter that re-probes, so a hot config change must reach the next job.
@@ -839,17 +878,17 @@ export function apply(ctx, config) {
             (path) => { recoveryPath = path },
           ),
         })
-        const own = rootId === caller ? 'this session' : `the session root (${String(rootId).replace(/^session-/, '').slice(0, 8)})`
+        const own = ownerId === caller ? 'this session' : `the session root (${String(ownerId).replace(/^session-/, '').slice(0, 8)})`
         // Who can read a root-owned job depends on WHO is asking, so the sentence does too. It
         // used to be constant, and it told the orchestrator — the one caller that CAN read a
         // root-owned job — that the job was unreadable from its session.
-        const tail = rootId === caller
+        const tail = ownerId === caller
           ? 'It outlives this turn: read it with job_output, where wait: true blocks until it settles.'
           : 'It will keep running after you finish, and it is NOT readable from your session — pass the id '
             + 'back so the owner can read it with job_output. Do not wait for it.'
         return {
           job_id: jobId,
-          owner: rootId,
+          owner: ownerId,
           text: `Started ${jobId} as a detached job owned by ${own}. ${tail}`,
         }
       },
@@ -1054,6 +1093,91 @@ function agentById(id) {
 }
 
 /**
+ * The LIVE agents, by session id, from ONE consultation of the registry.
+ *
+ * This is the arbitration source of the owner fallback below, and it is deliberately NOT
+ * `agentById`: that one also answers from the announced map, which is this mount's memory of
+ * what it has SEEN, not of what is ALIVE. A continued session's dead parent is absent from
+ * both, and the fallback exists for exactly that case — but it must never hand a job to an
+ * agent that has already been disposed, so it asks the registry alone.
+ *
+ * `list()` is the documented read (`ctx.agents.list()`, already used at mount time in
+ * `apply()`) and it is ONE call for the whole chain, never one `get(id)` per hop. It is also
+ * the source this module's header calls intermittently empty; the consequence is taken where
+ * it lands: nothing live means the resolution FAILS, it never guesses.
+ *
+ * @returns a Map of session id → Agent; empty when no registry was captured or it throws.
+ */
+function liveAgentsById() {
+  const list = agentsService?.list
+  if (typeof list !== 'function') return new Map()
+  const byId = new Map()
+  try {
+    for (const agent of list.call(agentsService) ?? []) {
+      const id = agent?.session?.id
+      if (typeof id === 'string' && id !== '') byId.set(id, agent)
+    }
+  } catch {
+    // A registry that throws answers nothing: the caller refuses rather than guessing.
+    return new Map()
+  }
+  return byId
+}
+
+/**
+ * WHO OWNS a job requested by `sessionId` — the rule, written once.
+ *
+ *   1. `rootOf(sessionId)`: the durable headers. UNCHANGED, and still the resolution — they
+ *      are the only source that answered correctly every time it was asked.
+ *   2. If the agent of that root is known — live, or announced to this mount — the owner IS
+ *      that root. UNCHANGED, and the only path a healthy tree ever takes.
+ *   3. Otherwise the root the headers returned is GONE. That is a session CONTINUED after a
+ *      restart: a seeded fork (`isSeeded`, `delegationDepth: 0`) whose parent is the session
+ *      of the previous process, which will never come back. Measured in the relay journal:
+ *
+ *        {"step":"register-skipped","why":"root-agent-unknown","id":"7fa9e670","root":"018354d9"}
+ *        {"step":"register-skipped","why":"root-agent-unknown","id":"00ce339d","root":"018354d9"}
+ *
+ *      — the continued session AND the child it had just created, both refused because of the
+ *      dead `018354d9` they descend from, and `run_detached` refused at the root itself. The
+ *      owner is then the HIGHEST LIVING ANCESTOR of the chain, or the caller itself when it
+ *      is the only live one. The live registry is consulted ONCE (`list()`, in
+ *      `liveAgentsById`) to ARBITRATE that choice; it never resolves the chain.
+ *      With nothing alive anywhere on the chain the resolution FAILS, exactly as before: fail
+ *      closed, never a job handed to a session that cannot collect it.
+ *
+ * The fallback is JOURNALLED when it serves (`owner-fallback`, carrying `headerRoot` and
+ * `liveOwner`): a silent fallback would be indistinguishable from a normal resolution in the
+ * only file that records what happened.
+ *
+ * @param sessionId - the session that requested the job, or whose registration is decided.
+ * @returns `{ owner, headerRoot, fallback, agent }` when an owner is resolved, else
+ *   `{ why, root? }` — the refusal reasons the predicate already published.
+ */
+function resolveOwner(sessionId) {
+  if (typeof sessionId !== 'string' || sessionId === '') return { why: 'caller-has-no-session-id' }
+  const headerRoot = rootOf(sessionId)
+  if (headerRoot === undefined) return { why: 'root-not-resolved' }
+  const known = agentById(headerRoot)
+  if (known !== undefined) return { owner: headerRoot, headerRoot, fallback: false, agent: known }
+  const live = liveAgentsById()
+  const chain = chainOf(sessionId)
+  // Highest first: in a caller-first chain the LAST live element is the closest to the root.
+  for (let index = chain.length - 1; index >= 0; index--) {
+    const agent = live.get(chain[index])
+    if (agent === undefined) continue
+    trace(bootState, {
+      step: 'owner-fallback',
+      id: shortId(sessionId),
+      headerRoot: shortId(headerRoot),
+      liveOwner: shortId(chain[index]),
+    })
+    return { owner: chain[index], headerRoot, fallback: true, agent }
+  }
+  return { why: 'root-agent-unknown', root: headerRoot }
+}
+
+/**
  * Can the OWNER of `sessionId` collect a job started for it?
  *
  * THE PREDICATE IS ABOUT THE OWNER, NEVER ABOUT THE CALLER, and the whole design rests on
@@ -1085,15 +1209,26 @@ function agentById(id) {
  * `scopeOf(agent.ctx) === agent` was measured true — so this is `scopeOf` WITHOUT importing
  * `@deepseek-ai/dsh-scope`, a package this plugin deliberately has no dependency on.
  *
- * @param sessionId - the session of the agent being registered, whose ROOT decides.
+ * WHAT "THE OWNER" IS NOW. It is the session `resolveOwner` returns: the header root while it
+ * is alive, otherwise the highest LIVING ancestor of the chain — or this agent itself when it
+ * is the only live one. The predicate is otherwise untouched: it still asks whether THAT
+ * session can collect. It simply bears on the right session now, which is the one thing the
+ * continued-session case was missing.
+ *
+ * @param sessionId - the session whose OWNER decides.
  * @returns `{ collectable, root?, why?, error? }`; `why` names the condition when false.
  */
 function ownerVerdict(sessionId) {
-  if (typeof sessionId !== 'string' || sessionId === '') return { collectable: false, why: 'caller-has-no-session-id' }
-  const root = rootOf(sessionId)
-  if (root === undefined) return { collectable: false, why: 'root-not-resolved' }
-  const owner = agentById(root)
-  if (owner === undefined) return { collectable: false, why: 'root-agent-unknown', root }
+  const resolution = resolveOwner(sessionId)
+  const owner = resolution.agent
+  const root = resolution.owner
+  if (owner === undefined || root === undefined) {
+    return {
+      collectable: false,
+      why: resolution.why,
+      ...(resolution.root === undefined ? {} : { root: resolution.root }),
+    }
+  }
   const ownerCtx = owner.ctx
   if (ownerCtx === undefined) return { collectable: false, why: 'root-has-no-ctx', root }
   // `ctx.get` and not `ctx.tools`: the latter throws on the property GET without an

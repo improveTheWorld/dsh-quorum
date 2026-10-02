@@ -9,8 +9,8 @@ leurs mesures dans `DECISIONS.md`.
 ## 1. En une ligne
 
 `C:\CodeSource\dsh-boost` est le depot consolide du mode Boost : **huit lignes** montees par un seul
-bundle installable. Le profil `web` pointe dessus. Etat : `HEAD 8debe45`, 45 commits, **235 cas a la
-racine, 0 echec**, arbre propre.
+bundle installable. Le profil `web` pointe dessus. Etat : **256 cas a la racine, 0 echec**, arbre propre
+(`git log -1` pour le HEAD — un compte ecrit ici perime a chaque commit).
 
 ```
 les huit lignes, dans l'ordre :
@@ -64,8 +64,9 @@ README.md:117,171   et   docs/HANDOVER.md:276   annoncent encore 32/32 pour boos
 
 ```
 les huit lignes montees, 0 avertissement        dsh --profile web --dump-config
-235 cas a la racine, 0 echec                     node --test  (le run racine COLLECTE les paquets)
-quatre sondes vertes                             probe-stop · probe-mount · probe-fork-guard · probe-lessons
+256 cas a la racine, 0 echec                     node --test  (le run racine COLLECTE les paquets)
+CINQ sondes vertes                              probe-stop · probe-mount · probe-fork-guard · probe-lessons
+                                                · probe-owner-gate
 le canal, en service                             3 usages reels ; bornes exercees (2 livres / 5 throttles)
 la garde du fork                                 egalite a DELTA 0 TOKEN sur un fork REEL
 le fork reel                                     46,31 %, verdict ok, l'enfant re-mesure 463 106

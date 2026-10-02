@@ -812,13 +812,35 @@ export function defaultMessage(envelope) {
   return { id: 'boost-channel:' + envelope.id, role: 'user', content, source }
 }
 
-/** Le parent durable d'un agent vivant, marche a la racine. Borne a 16 sauts. */
+/**
+ * LE PROPRIETAIRE DE L'ARBRE : le plus haut ancetre VIVANT de la chaine de
+ * parents, ou l'appelant lui-meme quand aucun ancetre n'est vivant.
+ *
+ * On remonte tant que le parent est VIVANT (present dans le registre) ; des
+ * qu'il ne l'est plus, on RESTE sur le dernier vivant. Rendre le parent MORT
+ * cassait exactement le cas d'une session CONTINUEE : apres un redemarrage, la
+ * session reprise est un fork seede ('isSeeded: true', 'delegationDepth: 0')
+ * dont le parent — la session d'avant — n'est plus vivant. Sa racine resolvait
+ * alors vers cette session morte : 'channel_post' rendait 'no-owner',
+ * 'channel_read' une page vide suivie de 'read_refused' (l'appelant n'etait pas
+ * proprietaire de son propre arbre), et un ENFANT adressait ses messages a la
+ * racine morte. Mesure du 2026-10-02 : compteurs du processus posted=2
+ * delivered=0 wake_refused=2 read=0 read_refused=2.
+ *
+ * Le seul cas ou l'id rendu n'est pas constate vivant est celui ou l'appelant
+ * lui-meme est absent du registre : sa chaine est alors illisible, et la regle
+ * dit que l'appelant est le proprietaire.
+ *
+ * Borne a 16 sauts : un cycle dans un registre malforme ne doit pas boucler.
+ */
 export function liveRootOf(agents, id, maxHops = 16) {
   let current = id
   for (let hop = 0; hop < maxHops; hop++) {
     const parent = agents?.get?.(current)?.session?.header?.parentSession
     if (typeof parent !== 'string' || parent === '' || parent === current) return current
-    if (agents?.get?.(parent) === undefined) return parent
+    // Le parent n'est plus vivant : 'current' est le plus haut ancetre VIVANT,
+    // donc le proprietaire. Rendre 'parent' designerait une session morte.
+    if (agents?.get?.(parent) === undefined) return current
     current = parent
   }
   return current

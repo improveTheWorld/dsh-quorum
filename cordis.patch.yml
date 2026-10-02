@@ -426,8 +426,11 @@
     - id: dsh-boost-context-budget
       name: ./packages/boost-context-budget/lib/index.js
     # HUITIEME LIGNE : les lecons a la compaction, ETAPE 1 — un listener
-    # `session/event` SANS TAG qui JOURNALISE les compactions de RACINE (aucun
-    # modele, aucun enfant, aucune depense). Comme les sept autres, cette ligne
+    # `session/event` SANS TAG qui JOURNALISE les compactions des sessions SANS
+    # PARENT VIVANT : les racines, ET les sessions CONTINUEES (un fork seede dont le
+    # parent est mort — mesure du 2026-10-02 : la session reprise de l'utilisateur,
+    # `register-skipped [why: root-agent-unknown]` chez trois voisins). Aucun modele,
+    # aucun enfant, aucune depense. Comme les sept autres, cette ligne
     # est la copie A L'IDENTIQUE de `packages/boost-lessons/cordis.patch.yml` —
     # seul le chemin du `name` change (meme raison que ci-dessus).
     - id: dsh-boost-lessons

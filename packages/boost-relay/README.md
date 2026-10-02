@@ -34,7 +34,7 @@ ou re-délégation du contrôle.
 |---|---|
 | Montage **host-level**, pas dans le preset | Rien dans le preset ne peut rendre visible un job qui appartient à un autre propriétaire ; et un nouveau bundle s'active **à chaud**, sans redémarrage |
 | Réutilisation du discriminant de source `tool-jobs` | Un plugin ne peut pas déclarer un nouveau membre de cette union à l'exécution ; et c'est bien un avis de job d'arrière-plan |
-| Relation propriétaire → racine par `ctx.subagents.listDescendants(rootId)` | Lecture durable : fonctionne aussi pour des enfants créés **avant** l'installation du plugin |
+| Relation propriétaire → racine par les **en-têtes durables** (`parentSession`, 16 sauts), avec un **repli sur le plus haut ancêtre VIVANT** | Lecture durable : fonctionne aussi pour des enfants créés **avant** l'installation du plugin. Le repli est ce qui sauve une session **continuée** — après un redémarrage, la session reprise est un fork seedé dont le parent (l'ancien processus) est mort |
 | Réveil plafonné à **3 par racine**, puis injection | Borne la chaîne auto-excitante « un tour réveillé démarre le travail dont la fin le réveille » |
 | Aucun import statique de paquet Harness | Un bundle lié hors du profil ne résout pas les spécificateurs nus (`ERR_MODULE_NOT_FOUND`, vérifié) ; `createUserMessage` est résolu à l'exécution depuis l'ancre `process.argv[1]` |
 | Ne rien relayer pour un propriétaire `running` | Son propre agent reçoit l'avis nativement : le relais serait un doublon |
