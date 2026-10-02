@@ -2,7 +2,7 @@
   "name": "@local/dsh-boost-context-budget",
   "version": "0.1.0",
   "private": true,
-  "description": "Context budget for the Boost fork: exposes the caller's inheritable context occupancy (context_occupancy) and refuses subagent_fork above a configurable ratio, with a deferred compaction so the refusal is executable.",
+  "description": "Context budget for the Boost fork: exposes the caller's inheritable context occupancy (context_occupancy), refuses subagent_fork above a configurable ratio, and lets the parent REQUEST its own deferred compaction (context_compact) — the refusal itself arms nothing.",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",

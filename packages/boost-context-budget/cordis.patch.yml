@@ -1,5 +1,7 @@
-# Budget de contexte : 'context_occupancy' expose l'occupation, et 'subagent_fork'
-# est refuse au-dela du seuil 'forkThresholdRatio' (defaut 0,6).
+# Budget de contexte : 'context_occupancy' expose l'occupation, 'context_compact'
+# DEMANDE la compaction du pere (honoree a son turn end), et 'subagent_fork' est
+# refuse au-dela du seuil 'forkThresholdRatio' (defaut 0,6). Le refus, lui, n'arme
+# plus RIEN : une compaction non voulue coute de l'histoire et un appel de modele.
 #
 # Niveau HOST, et c'est une condition de fonctionnement, pas un detail : la ligne
 # capture le service 'agents' NON scope et installe son outil DANS LA SURFACE DE

@@ -9,20 +9,31 @@
  * qui manquait : une MESURE de ce qui sera herite, et un REFUS quand cette
  * mesure depasse un seuil configurable.
  *
- * Trois pieces, et chacune existe pour une raison mesuree :
+ * Quatre pieces, et chacune existe pour une raison mesuree :
  *   1. l'outil 'context_occupancy' rend a l'agent APPELANT
  *      '{ inheritedTokens, windowTokens, ratio, forkThresholdRatio, verdict }'.
  *      Le capitaine l'appelle QUAND IL VEUT, y compris avant de decider ;
  *   2. un listener 'tools/pre-execute' (waterfall) REFUSE 'subagent_fork' quand
  *      'ratio > forkThresholdRatio', avec un message qui nomme les DEUX nombres
- *      et dit quoi faire. Le refus est journalise ('fork-refused') et compte ;
- *   3. la COMPACTION DIFFEREE : un agent qui appelle un outil est 'running',
- *      donc il ne peut pas se compacter lui-meme a cet instant
+ *      et les TROIS sorties. Le refus est journalise ('fork-refused') et compte —
+ *      et il N'ARME PLUS RIEN : un refus est un refus, il informe, il ne decide
+ *      pas a la place du pere ;
+ *   3. l'outil 'context_compact' : le pere DEMANDE sa propre compaction, une
+ *      demande par tour au plus ;
+ *   4. la COMPACTION DIFFEREE : un agent qui appelle un outil est 'running', donc
+ *      il ne peut pas se compacter lui-meme a cet instant
  *      ('dsh-compaction/lib/types/index.d.ts:57-65' : 'runMaintenance' « throws
- *      synchronously when the agent is already active »). Le refus ARME une
- *      compaction, et c'est le 'turn/end' du meme tour qui la declenche — quand
- *      l'agent n'est plus actif. C'est ce qui rend la regle executable au lieu
- *      de punitive.
+ *      synchronously when the agent is already active »). C'est le 'turn/end' du
+ *      tour de la DEMANDE qui la declenche — quand l'agent n'est plus actif.
+ *
+ * L'ARBITRAGE, et c'est lui qui a fait retirer l'armement automatique du refus :
+ * une compaction MANQUANTE coute un tour ; une compaction NON VOULUE coute de
+ * l'histoire et un appel de modele. Le doute doit profiter a celui qui ne perd
+ * rien. Le refus qui armait la compaction la declenchait MEME quand le pere
+ * renoncait au fork pour deleguer avec un brief — un appel de modele et de
+ * l'histoire perdue POUR UN FORK QUI N'AURA PAS LIEU. Et il la declenchait des
+ * 60 % quand la politique du harnais ne compacte d'elle-meme qu'a 85 % : 25
+ * points plus tot, sur une simple TENTATIVE de fork.
  *
  * OU LIT-ON LES DEUX NOMBRES. Ils ne sont pas codes en dur, et ils viennent de
  * la meme famille : les PROJECTIONS de session, que le harnais tient deja.
@@ -67,7 +78,18 @@ export const inject = ['agents']
  * outil ajoute sans elle fait rougir la SUITE, pas une sonde que personne ne
  * lance. Copie assumee du motif de 'packages/boost-channel/lib/index.js:1552'.
  */
-export const TOOL_NAMES = ['context_occupancy']
+export const OCCUPANCY_TOOL = 'context_occupancy'
+
+/**
+ * L'OUTIL DE DEMANDE — nomme ici parce que le MESSAGE DE REFUS le nomme, et
+ * qu'un message qui nomme un outil doit le nommer depuis une seule source.
+ *
+ * C'est la sortie n° 1 du pere qui veut toujours forker : il DEMANDE sa
+ * compaction, elle tourne a son 'turn/end', et il forke au tour suivant.
+ */
+export const COMPACT_TOOL = 'context_compact'
+
+export const TOOL_NAMES = [OCCUPANCY_TOOL, COMPACT_TOOL]
 
 /**
  * L'outil que ce paquet garde — par son NOM, et c'est une LIMITE, ecrite ici
@@ -118,6 +140,23 @@ export const DEFAULT_FORK_THRESHOLD_RATIO = 0.6
 export const VERDICT_OK = 'ok'
 export const VERDICT_REFUSED = 'refused'
 export const VERDICT_UNKNOWN = 'unknown'
+
+/**
+ * Les motifs rendus par l'outil de DEMANDE ('context_compact').
+ *
+ *   - 'requested' — la demande est retenue, elle sera honoree au 'turn/end' ;
+ *   - 'already-pending' — une demande du MEME tour est deja retenue : une seule
+ *     compaction par tour, et la premiere suffit ;
+ *   - 'below-threshold' — mesure faite, le fork n'est PAS bloque : une
+ *     compaction ne gagnerait rien et perdrait de l'histoire ;
+ *   - 'compact-ineffective' — une compaction DEMANDEE n'a pas fait descendre le
+ *     ratio : elle ne sera pas repetee (journal 'compact-ineffective').
+ */
+export const REQUEST_PENDING = 'requested'
+export const REQUEST_DUPLICATE = 'already-pending'
+export const REQUEST_USELESS = 'below-threshold'
+export const REQUEST_LATCHED = 'compact-ineffective'
+export const REQUEST_REASONS = [REQUEST_PENDING, REQUEST_DUPLICATE, REQUEST_USELESS, REQUEST_LATCHED]
 
 /** Journal du plugin : bornage par rotation, comme les autres lignes. */
 export const JOURNAL_MAX_BYTES = 1024 * 1024
@@ -395,15 +434,25 @@ export function inheritedOf(services, session, boundary, events) {
  * @param services - '{ tokenMeter?, sessionProjections? }', tous optionnels.
  * @param session - la session mesuree (celle de l'appelant).
  * @param threshold - le seuil effectif de la ligne.
+ * @param boundary - la FRONTIERE du prefixe mesure. Par defaut le dernier
+ *   'turn/end' : c'est ce qu'un fork herite, et c'est la seule frontiere que la
+ *   GARDE utilise. Une frontiere PLUS LARGE n'est fournie que par la mesure qui
+ *   JUGE une compaction ('measureAfterCompaction', dans 'apply') : une compaction
+ *   exige un tour ferme, donc elle ecrit ses evenements APRES le dernier
+ *   'turn/end', et la frontiere du fork ne les voit pas encore. Mesure sur la
+ *   vraie pile (Session + TokenMeter + SessionProjectionRegistry) : 4 532 tokens
+ *   au dernier 'turn/end' AVANT la compaction, 4 532 au MEME cut APRES, et 10 au
+ *   dernier evenement. Juger une compaction au cut du fork declarerait
+ *   'ineffective' toute compaction qui MARCHE.
  * @returns '{ inheritedTokens, windowTokens, ratio, forkThresholdRatio, verdict, sources }',
  *   avec 'null' partout ou la mesure n'est pas etablie. 'sources' est DECLARE au
  *   schema de sortie : le registre valide la valeur rendue et rejette toute cle
  *   non declaree ('dsh-tools/lib/index.js:3541-3544').
  */
-export function measure(services, session, threshold) {
+export function measure(services, session, threshold, boundary = undefined) {
   const events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : undefined
-  const boundary = boundarySeqOf(events)
-  const inherited = inheritedOf(services, session, boundary, events)
+  const cut = boundary === undefined ? boundarySeqOf(events) : boundary
+  const inherited = inheritedOf(services, session, cut, events)
   const window = windowOf(services, session, events)
   const ratio = inherited.inheritedTokens === null || window.windowTokens === null
     ? null
@@ -417,7 +466,7 @@ export function measure(services, session, threshold) {
     ratio,
     forkThresholdRatio: threshold,
     verdict,
-    sources: { inherited: inherited.source, window: window.source, boundarySeq: boundary },
+    sources: { inherited: inherited.source, window: window.source, boundarySeq: cut },
     // HORS schema de sortie : 'sources' n'a que trois cles declarees. L'outil
     // projette les six cles canoniques ; ce champ sert au JOURNAL et a l'appelant
     // interne, jamais au modele.
@@ -431,16 +480,21 @@ function percent(ratio) {
 }
 
 /**
- * Le message de refus : les DEUX nombres, et ce qu'il faut FAIRE.
+ * Le message de refus : les DEUX nombres, et les TROIS sorties.
  *
- * Refuser sans dire pourquoi serait pire que ne pas refuser : le modele doit
- * pouvoir executer la sortie de secours, et la sortie de secours est ecrite ici.
+ * Refuser sans dire pourquoi serait pire que ne pas refuser. Trois sorties, et
+ * aucune n'est imposee : DEMANDER sa compaction (elle tourne a la fin du tour,
+ * puis on forke), DELEGUER avec un brief indexe (la route la moins chere), ou
+ * RENONCER au fork. Le refus n'arme RIEN — c'est le pere qui choisit, et la
+ * seule compaction qui coute quelque chose est celle qu'il a demandee.
  */
 export function refusalMessage(inheritedTokens, windowTokens, ratio, threshold) {
   return 'fork refuse : ton contexte heritable vaut ' + percent(ratio) + ' % de la fenetre, le seuil est '
-    + percent(threshold) + ' % (' + inheritedTokens + ' tokens herites sur ' + windowTokens + '). termine ton tour'
-    + ' — la compaction tournera pendant que tu es inactif — puis forke au tour suivant, ou delegue avec'
-    + ' subagent_implement et un brief indexe.'
+    + percent(threshold) + ' % (' + inheritedTokens + ' tokens herites sur ' + windowTokens + '). trois sorties :'
+    + ' 1) tu veux toujours forker -> demande ta compaction (outil ' + COMPACT_TOOL + '), elle tournera a ton'
+    + ' turn end ; elle ecrit APRES la frontiere, donc ton fork ne la verra qu apres UN TOUR DE PLUS (mesure :'
+    + ' le prefixe herite ne bouge pas au tour suivant) ; 2) ou delegue avec subagent_implement et un brief indexe'
+    + ' (la route la moins chere) ; 3) ou renonce au fork et continue : rien ne t y oblige.'
 }
 
 /** Le texte rendu a l'appelant par l'outil d'occupation. */
@@ -457,6 +511,37 @@ export function occupancyText(value) {
 }
 
 /**
+ * Le texte rendu a l'appelant par l'outil de DEMANDE.
+ *
+ * Chaque motif dit la meme chose : ce qui va se passer, et ce que la demande
+ * coute. 'compact-ineffective' dit en plus les deux autres sorties — un pere qui
+ * ne peut pas descendre n'a plus que celles-la, et rien ne doit l'y forcer.
+ */
+export function compactText(value) {
+  const head = value.ratio === null
+    ? 'occupation INCONNUE (seuil ' + percent(value.forkThresholdRatio) + ' %)'
+    : 'contexte heritable ' + percent(value.ratio) + ' % de la fenetre (seuil '
+      + percent(value.forkThresholdRatio) + ' %)'
+  if (value.reason === REQUEST_PENDING) {
+    return 'compaction DEMANDEE : elle tournera a la fin de ce tour ('
+      + (value.turn === null ? 'au prochain turn end' : 'turn ' + value.turn + ' end')
+      + '). Comme elle ecrit APRES ta derniere frontiere, ton fork ne la verra qu apres UN TOUR DE PLUS'
+      + ' — mesure : le prefixe herite ne bouge pas au tour suivant. ' + head
+      + '. Une compaction resume l histoire : le detail remplace est perdu.'
+  }
+  if (value.reason === REQUEST_DUPLICATE) {
+    return 'compaction DEJA demandee pour ce tour : une seule compaction par tour, la premiere suffit. ' + head + '.'
+  }
+  if (value.reason === REQUEST_USELESS) {
+    return 'aucune compaction demandee : ' + head + ' — sous le seuil le fork n est PAS bloque,'
+      + ' une compaction ne gagnerait rien et perdrait de l histoire.'
+  }
+  return 'aucune compaction demandee : ' + head + ' — une compaction DEMANDEE n a pas fait descendre'
+    + ' ce ratio, elle ne sera pas repetee. Delegue avec subagent_implement et un brief indexe,'
+    + ' ou renonce au fork.'
+}
+
+/**
  * L'OUTIL D'OCCUPATION.
  *
  * Il ne prend AUCUN argument : un appelant ne peut pas demander l'occupation
@@ -470,7 +555,7 @@ export function occupancyText(value) {
 export function buildTools(controller) {
   return [
     {
-      name: 'context_occupancy',
+      name: OCCUPANCY_TOOL,
       description: 'Rend l occupation du contexte de TON agent : inheritedTokens (ce qu un fork heriterait '
         + '— le prefixe clos jusqu au dernier turn/end), windowTokens (la fenetre du modele de ta route), '
         + 'ratio, forkThresholdRatio (le seuil de la ligne), verdict (ok | refused | unknown) et sources '
@@ -536,6 +621,48 @@ export function buildTools(controller) {
         }
       },
     },
+    {
+      name: COMPACT_TOOL,
+      description: 'DEMANDE la compaction de TON contexte. Elle ne tourne pas pendant cet appel — un agent qui'
+        + ' appelle un outil est actif, et il ne peut pas se compacter — mais a la FIN DE TON TOUR, quand tu ne'
+        + ' l es plus. Une demande par tour au plus. C est IRREVERSIBLE : la compaction resume ton histoire, et'
+        + ' le detail remplace est perdu. A appeler quand context_occupancy dit que le fork est refuse'
+        + ' (ratio > forkThresholdRatio) et que tu veux TOUJOURS forker : apres la compaction, forke au tour'
+        + ' suivant. Si la compaction ne fait pas descendre le ratio, elle ne sera pas repetee : delegue avec'
+        + ' subagent_implement et un brief indexe, ou renonce au fork. Aucun argument.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            requested: { type: 'boolean', description: 'true quand une compaction est demandee pour CE tour — retenue par cet appel, ou deja retenue par un appel du meme tour.' },
+            pending: { type: 'boolean', description: 'true quand une demande attend le turn/end de ce tour.' },
+            duplicate: { type: 'boolean', description: 'true quand la demande etait DEJA retenue pour ce tour : elle n a pas ete doublee.' },
+            turn: {
+              description: 'Le tour dont le turn/end soldera la demande. null quand le turn/start n a pas ete lisible : la demande se soldera alors au prochain turn/end.',
+              oneOf: [{ type: 'integer' }, { type: 'null' }],
+            },
+            ratio: {
+              description: 'Le ratio mesure AU MOMENT DE LA DEMANDE. null quand la mesure n est pas etablie.',
+              oneOf: [{ type: 'number' }, { type: 'null' }],
+            },
+            forkThresholdRatio: { type: 'number', description: 'Seuil effectif de la ligne : au-dela, subagent_fork est refuse.' },
+            verdict: { type: 'string', enum: [VERDICT_OK, VERDICT_REFUSED, VERDICT_UNKNOWN], description: 'ok (un fork passe) | refused (il serait refuse) | unknown (mesure incomplete).' },
+            reason: { type: 'string', enum: REQUEST_REASONS, description: 'requested (demande retenue) | already-pending (deja demandee pour ce tour) | below-threshold (le fork n est pas bloque) | compact-ineffective (une compaction demandee n a pas suffi : elle ne sera pas repetee).' },
+          },
+          required: ['requested', 'pending', 'duplicate', 'turn', 'ratio', 'forkThresholdRatio', 'verdict', 'reason'],
+        },
+        render: (_args, value) => [{ type: 'text', text: compactText(value) }],
+      },
+      execute: async (_args, exec) => {
+        const session = exec?.agent?.session
+        if (session === undefined || session === null) {
+          throw new Error(COMPACT_TOOL + ': aucune session appelante — une demande appartient a un agent.')
+        }
+        return controller.requestCompaction(session)
+      },
+    },
   ]
 }
 
@@ -566,11 +693,21 @@ export function apply(ctx, config = {}) {
   const threshold = resolveThreshold(config.forkThresholdRatio, journal)
   const forkTools = resolveForkTools(config.forkToolNames, journal)
   const guarded = new Set(forkTools)
-  const stats = { measured: 0, refused: 0, passed: 0, compacted: 0, compact_failed: 0, unknown: 0, arm_orphaned: 0, arm_unbounded: 0, provider_guarded: 0 }
-  // Une session dont le tour courant a subi un refus, AVEC LE TOUR. Un booleen ne
-  // suffirait pas : l'armement survivrait a un tour qui ne se ferme JAMAIS, et
-  // tirerait sur le premier 'turn/end' venu — un tour etranger, sans rapport.
-  const refusedThisTurn = new Map()
+  const stats = {
+    measured: 0, refused: 0, passed: 0, unknown: 0, provider_guarded: 0,
+    compacted: 0, compact_failed: 0, compact_ineffective: 0,
+    request_duplicate: 0, request_useless: 0, request_latched: 0, request_orphaned: 0, request_unbounded: 0,
+  }
+  // LES DEMANDES DE COMPACTION, par session, AVEC LE TOUR de la demande. Un
+  // booleen ne suffirait pas : la demande survivrait a un tour qui ne se ferme
+  // JAMAIS, et tirerait sur le premier 'turn/end' venu — un tour etranger, sans
+  // rapport. Un refus n'ecrit JAMAIS ici : c'est l'outil 'context_compact' qui
+  // remplit cette table, et rien d'autre.
+  const compactRequests = new Map()
+  // Les sessions ou une compaction DEMANDEE n'a PAS fait descendre le ratio. Le
+  // verrou tombe de lui-meme des qu'une mesure repasse sous le seuil : il ne
+  // bloque que la repetition d'une depense qui a deja echoue.
+  const ineffective = new Map()
   const inflight = new Set()
 
   journal({ step: 'mounted', pid: process.pid, threshold, forkTools: forkTools.join(',') })
@@ -582,14 +719,117 @@ export function apply(ctx, config = {}) {
     return value
   }
 
+  /** Le seq du DERNIER evenement du journal, ou -1 quand il n'est pas lisible. */
+  const lastSeqOf = (session) => {
+    let events
+    try {
+      events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : undefined
+    } catch {
+      return -1
+    }
+    if (!Array.isArray(events) || events.length === 0) return -1
+    const seq = events[events.length - 1]?.seq
+    return typeof seq === 'number' && Number.isInteger(seq) ? seq : -1
+  }
+
+  /**
+   * LA MESURE QUI JUGE LA COMPACTION — et ce n'est PAS celle du fork.
+   *
+   * Une compaction exige un tour FERME ('dsh-compaction-basic/lib/index.js:455-462'
+   * : 'manual compaction: the session already has an open turn' est le refus
+   * 'busy'), donc elle ecrit ses evenements APRES le dernier 'turn/end'. Au cut du
+   * fork, une compaction qui MARCHE ne change donc RIEN : mesure sur la vraie pile,
+   * 4 532 tokens avant, 4 532 apres, contre 10 au dernier evenement. Juger au cut du
+   * fork declarerait 'compact-ineffective' TOUTE compaction reussie, et le verrou
+   * qui suit refuserait la demande suivante d'un pere qui a pourtant de la place.
+   *
+   * La frontiere est donc le DERNIER EVENEMENT : « ce que le fork heriterait si ce
+   * tour se fermait maintenant ». Meme source que la garde ('restore'), meme
+   * fonction, une seule frontiere change — et elle est ECRITE dans 'sources'.
+   */
+  const measureAfterCompaction = (session) => {
+    const value = measure(services, session, threshold, lastSeqOf(session))
+    stats.measured++
+    if (value.verdict === VERDICT_UNKNOWN) stats.unknown++
+    return value
+  }
+
+  /**
+   * LA DEMANDE — le SEUL chemin qui retient une compaction.
+   *
+   * Un refus n'ecrit plus rien ici (voir l'arbitrage en tete de module) : le pere
+   * DEMANDE, et sa demande est retenue pour SON tour. Quatre reponses, et chacune
+   * dit pourquoi :
+   *   - 'already-pending' : une demande du meme tour est deja retenue — une seule
+   *     compaction par tour, et la premiere suffit ;
+   *   - 'below-threshold' : la mesure est faite, et le fork n'est PAS bloque ;
+   *     compacter ne gagnerait rien et perdrait de l'histoire ;
+   *   - 'compact-ineffective' : une compaction DEMANDEE n'a pas fait descendre ce
+   *     ratio — on ne la paie pas une seconde fois ;
+   *   - 'requested' : la demande est retenue, 'turn/end' la soldera.
+   *
+   * Une mesure ABSENTE ('ratio: null') n'empeche pas la demande : le pere a
+   * demande, il sait ce qu'il fait, et rien ici ne peut prouver le contraire.
+   */
+  const requestCompaction = (session) => {
+    const id = session?.id
+    if (typeof id !== 'string' || id === '') {
+      throw new Error(COMPACT_TOOL + ': aucune session appelante — une demande appartient a un agent.')
+    }
+    const value = measureFor(session)
+    const shape = { ratio: value.ratio, forkThresholdRatio: threshold, verdict: value.verdict }
+    const pending = compactRequests.get(id)
+    if (pending !== undefined) {
+      stats.request_duplicate++
+      journal({ step: 'compact-request-duplicate', id: safeKey(id), turn: pending.turn, ratio: value.ratio })
+      return { ...shape, requested: true, pending: true, duplicate: true, turn: pending.turn, reason: REQUEST_DUPLICATE }
+    }
+    if (value.ratio !== null && value.ratio <= threshold) {
+      // Le fork n'est pas bloque : rien a gagner, et de l'histoire a perdre. Le
+      // verrou d'inefficacite tombe ici, parce que la mesure qui le fondait a
+      // change.
+      if (ineffective.delete(id)) {
+        journal({ step: 'compact-request-latch-cleared', id: safeKey(id), ratio: value.ratio, threshold })
+      }
+      stats.request_useless++
+      journal({ step: 'compact-request-below-threshold', id: safeKey(id), ratio: value.ratio, threshold })
+      return { ...shape, requested: false, pending: false, duplicate: false, turn: null, reason: REQUEST_USELESS }
+    }
+    if (ineffective.has(id)) {
+      // La PREUVE est faite : cette compaction-la ne fait pas descendre ce ratio.
+      const proof = ineffective.get(id)
+      stats.request_latched++
+      journal({ step: 'compact-request-refused', id: safeKey(id), why: REQUEST_LATCHED, ratio: value.ratio, threshold, provenRatio: proof.ratio })
+      return { ...shape, requested: false, pending: false, duplicate: false, turn: null, reason: REQUEST_LATCHED }
+    }
+    let turn = null
+    try {
+      turn = openTurnOf(session?.snapshotEvents?.())
+    } catch {
+      turn = null
+    }
+    compactRequests.set(id, { turn, ratio: value.ratio, at: Date.now() })
+    if (turn === null) {
+      stats.request_unbounded++
+      journal({ step: 'compact-request-unbounded', id: safeKey(id), why: 'turn/start illisible : la demande se soldera au prochain turn/end' })
+    }
+    journal({ step: 'compact-requested', id: safeKey(id), turn, ratio: value.ratio, threshold, sources: value.sources })
+    return { ...shape, requested: true, pending: true, duplicate: false, turn, reason: REQUEST_PENDING }
+  }
+
   const controller = {
     threshold,
     forkTools,
     stats,
     measureFor,
+    /** LA DEMANDE : le seul chemin qui retient une compaction differee. */
+    requestCompaction,
     /** Attend les compactions differees en vol — la seule attente qu'un test doit faire. */
     settled: () => Promise.all([...inflight]),
-    refusedThisTurn,
+    /** Les demandes en attente, par session — le tour de chacune. */
+    compactRequests,
+    /** Les sessions dont une compaction DEMANDEE n'a pas fait descendre le ratio. */
+    ineffective,
   }
 
   // ---- 1. L'outil, installe par agent, dans SA surface ----------------------
@@ -662,24 +902,12 @@ export function apply(ctx, config = {}) {
       return next()
     }
     stats.refused++
-    // Le refus ARME la compaction differee du tour COURANT — c'est elle qui rend
-    // la regle executable, puisque l'agent ne peut pas se compacter lui-meme
-    // pendant qu'il appelle un outil. L'armement porte le TOUR, jamais un simple
-    // booleen : un tour qui ne se ferme jamais ne doit pas faire compacter le
-    // suivant.
-    if (typeof id === 'string' && id !== '') {
-      let turn = null
-      try {
-        turn = openTurnOf(exec?.agent?.session?.snapshotEvents?.())
-      } catch {
-        turn = null
-      }
-      refusedThisTurn.set(id, turn)
-      if (turn === null) {
-        stats.arm_unbounded++
-        journal({ step: 'fork-arm-unbounded', id: safeKey(id), why: 'turn/start illisible : l armement se consommera au prochain turn/end' })
-      }
-    }
+    // LE REFUS N'ARME RIEN. Il nommait deja les deux nombres ; il nomme maintenant
+    // les TROIS sorties, et la seule qui coute — demander sa compaction — est une
+    // DEMANDE explicite du pere (outil 'context_compact'). Armer ici declenchait la
+    // compaction MEME quand le pere renoncait au fork pour deleguer avec un brief,
+    // et 25 points sous la politique du harnais (0,6 contre 0,85) : une action
+    // IRREVERSIBLE prise sans demande, pour un fork qui n'aurait pas lieu.
     const reason = refusalMessage(verdict.inheritedTokens, verdict.windowTokens, verdict.ratio, threshold)
     journal({
       step: 'fork-refused',
@@ -772,16 +1000,16 @@ export function apply(ctx, config = {}) {
     journal({ step: 'provider-scan-failed', error: String(error?.message ?? error) })
   }
 
-  // ---- 3. La compaction differee, sur 'turn/end' ----------------------------
+  // ---- 3. La compaction DEMANDEE, sur 'turn/end' ----------------------------
   //
-  // 'turn/end' est le seul instant ou le refus d'un tour peut etre solde : la
-  // trace est publiee par 'session.append' ('dsh-session/lib/index.js:1473'),
-  // appelee SYNCHRONEMENT dans le 'finally' de 'runTurn'
-  // ('dsh-agent-loop/lib/index.js:1027') — donc AVANT que 'kick' ne ramene la
-  // phase a 'idle' ('dsh-agent-loop/lib/index.js:892-899'). A cet instant precis
-  // l'agent est encore 'running' et 'runMaintenance' leverait (« already has
-  // active work »). La garde attend donc l'inactivite OBSERVEE avant d'appeler
-  // 'compactNow', qui prend lui-meme l'agent en maintenance.
+  // 'turn/end' est le seul instant ou une demande se solde : la trace est publiee
+  // par 'session.append' ('dsh-session/lib/index.js:1473'), appelee SYNCHRONEMENT
+  // dans le 'finally' de 'runTurn' ('dsh-agent-loop/lib/index.js:1027') — donc
+  // AVANT que 'kick' ne ramene la phase a 'idle'
+  // ('dsh-agent-loop/lib/index.js:892-899'). A cet instant precis l'agent est
+  // encore 'running' et 'runMaintenance' leverait (« already has active work »).
+  // La garde attend donc l'inactivite OBSERVEE avant d'appeler 'compactNow', qui
+  // prend lui-meme l'agent en maintenance.
   const track = (promise) => {
     // Un suivi ne doit JAMAIS produire un rejet non gere : le processus du
     // harnais ne doit pas mourir d'une compaction qui a echoue.
@@ -799,7 +1027,16 @@ export function apply(ctx, config = {}) {
     return 'unverified'
   }
 
-  const compactAfterTurn = async (id) => {
+  /**
+   * LA COMPACTION DEMANDEE, honoree a la fin du tour.
+   *
+   * Elle rend TOUJOURS la main sans jeter (le suivi l'attrape), et elle REFERME LA
+   * BOUCLE : apres coup, on re-mesure. Une compaction qui ne fait pas descendre le
+   * ratio est une depense perdue — journalisee ('compact-ineffective', avec les
+   * deux valeurs) — et on n'en arme plus aucune : un pere qui ne peut pas descendre
+   * ne doit pas payer une compaction par tour.
+   */
+  const compactAfterTurn = async (id, request) => {
     let agent
     try {
       agent = agents?.get?.(id)
@@ -815,7 +1052,40 @@ export function apply(ctx, config = {}) {
       const idle = await waitIdle(agent)
       const result = await compaction.compactNow(agent, new AbortController().signal)
       stats.compacted++
-      journal({ step: 'fork-compacted', id: safeKey(id), idle, compacted: result != null })
+      journal({
+        step: 'compact-done',
+        id: safeKey(id),
+        idle,
+        requestedTurn: request?.turn ?? null,
+        ratioBefore: request?.ratio ?? null,
+        compacted: result != null,
+      })
+      // LA MESURE QUI FERME LA BOUCLE (voir 'measureAfterCompaction') ; sans
+      // chiffre, on ne conclut RIEN (trois etats, jamais deux).
+      let after = null
+      try {
+        after = measureAfterCompaction(agent?.session)
+      } catch (error) {
+        journal({ step: 'compact-remeasure-failed', id: safeKey(id), error: String(error?.message ?? error) })
+      }
+      if (after !== null && after.ratio !== null && after.ratio > threshold) {
+        stats.compact_ineffective++
+        ineffective.set(id, { ratio: after.ratio, threshold, at: new Date().toISOString() })
+        journal({
+          step: 'compact-ineffective',
+          id: safeKey(id),
+          ratio: after.ratio,
+          ratioBefore: request?.ratio ?? null,
+          threshold,
+          inheritedTokens: after.inheritedTokens,
+          windowTokens: after.windowTokens,
+          sources: after.sources,
+        })
+      } else if (after !== null && after.ratio !== null) {
+        // La compaction a fait son travail : plus rien a prouver pour cette
+        // session, le verrou d'inefficacite tombe.
+        ineffective.delete(id)
+      }
       return result
     } catch (error) {
       stats.compact_failed++
@@ -828,23 +1098,23 @@ export function apply(ctx, config = {}) {
     if (event?.type !== 'turn/end') return
     const id = session?.id
     if (typeof id !== 'string' || id === '') return
-    if (!refusedThisTurn.has(id)) return
-    const armed = refusedThisTurn.get(id)
-    // Consomme dans TOUS les cas : un armement ne survit jamais a son tour, et ne
-    // peut etre repose que par un refus du tour SUIVANT (une compaction par tour,
+    const request = compactRequests.get(id)
+    if (request === undefined) return
+    // Consommee dans TOUS les cas : une demande ne survit jamais a son tour, et ne
+    // peut etre reposee que par une NOUVELLE demande (une compaction par tour,
     // jamais deux).
-    refusedThisTurn.delete(id)
+    compactRequests.delete(id)
     const closing = typeof event.data?.turn === 'number' && Number.isInteger(event.data.turn) ? event.data.turn : null
-    if (armed !== null && closing !== null && armed !== closing) {
-      // Le tour du refus ne s'est JAMAIS ferme (arret, annulation, disparition de
-      // l'agent) : ce 'turn/end'-ci appartient a un AUTRE tour. Compacter ici
-      // agirait sur une session qui n'a rien a voir avec le refus — on le
-      // journalise et on s'arrete la.
-      stats.arm_orphaned++
-      journal({ step: 'fork-arm-orphaned', id: safeKey(id), armedTurn: armed, closingTurn: closing })
+    if (request.turn !== null && closing !== null && request.turn !== closing) {
+      // Le tour de la demande ne s'est JAMAIS ferme (arret, annulation,
+      // disparition de l'agent) : ce 'turn/end'-ci appartient a un AUTRE tour.
+      // Compacter ici agirait sur une session qui n'a rien a voir avec la demande
+      // — on le journalise et on s'arrete la.
+      stats.request_orphaned++
+      journal({ step: 'compact-request-orphaned', id: safeKey(id), requestedTurn: request.turn, closingTurn: closing })
       return
     }
-    track(compactAfterTurn(id))
+    track(compactAfterTurn(id, request))
   })
 
   return controller

@@ -2,18 +2,17 @@
 //
 //   node --test packages/boost-context-budget/test/context-budget.test.mjs
 //
-// Chaque cas ci-dessous peut ECHOUER, et c'est la seule raison de l'ecrire. Les
-// cas T-C1..T-C8 sont ceux qui ont decide la conception :
+// Chaque cas ci-dessous peut ECHOUER, et c'est la seule raison de l'ecrire.
 //
 //   T-C1  la mesure : le ratio est calcule, et le TOUR EN VOL est exclu du
 //         prefixe herite — c'est la frontiere meme que le fork applique ;
 //   T-C2  la regle : au-dessus du seuil le fork est REFUSE, et le message nomme
-//         les DEUX nombres (71 % contre 60 %) ;
+//         les DEUX nombres (71 % contre 60 %) et les TROIS sorties ;
 //   T-C3  le seuil est CONFIGURABLE : le meme ratio change de verdict ;
-//   T-C4  la compaction differee : un refus pendant le tour, puis 'turn/end' ->
-//         'compactNow' UNE fois, et jamais sur un tour sans refus ;
-//   T-C5  idempotence par tour : deux tours refuses, deux compactions ; deux
-//         refus dans le MEME tour, une seule ;
+//   T-C4b..T-C4d  la MECANIQUE de la compaction demandee : agent deja idle non
+//         attendu, agent disparu journalise, service de compaction illisible
+//         journalise — et jamais un rejet non gere ;
+//   T-C5b le tour d'un AUTRE agent ne solde pas la demande de celui-ci ;
 //   T-C6  un seuil invalide journalise et retombe sur le defaut, sans casser le
 //         montage ;
 //   T-C7  l'outil rend la mesure de l'APPELANT, et un appelant sans session ne
@@ -21,6 +20,23 @@
 //   T-C8  la valeur REELLE passe la validation du REGISTRE — le seul cas qui
 //         aurait attrape le defaut reel : appeler 'tool.execute(...)' passe
 //         AU-DESSUS de la couture qui valide le schema de sortie.
+//
+// LES CAS DU CORRECTIF. Le defaut mesure : le REFUS armait la compaction differee,
+// et le 'turn/end' du tour la declenchait sans que personne ne l'ait demandee —
+// meme quand le pere renoncait au fork, et 25 points sous la politique du harnais
+// (0,6 contre 0,85). Ces six cas tiennent le correctif :
+//
+//   T-K1  un refus SEUL n'appelle JAMAIS 'compactNow' — le cas qui prouve le
+//         correctif ;
+//   T-K2  une DEMANDE par l'outil fait appeler 'compactNow' UNE fois, au
+//         'turn/end' de ce tour ;
+//   T-K3  deux demandes dans le MEME tour -> une seule compaction ;
+//   T-K4  une demande dans un tour qui ne se ferme JAMAIS ne compacte pas un tour
+//         etranger (la regle par tour existe deja : conservee) ;
+//   T-K5  la compaction demandee ne fait pas passer le ratio sous le seuil ->
+//         'compact-ineffective' journalise, et AUCUNE nouvelle tentative ;
+//   T-K6  la valeur RENDUE par l'outil de demande passe la validation du REGISTRE
+//         — un cas par 'registry.execute', pas par 'tool.execute'.
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -30,8 +46,14 @@ import { pathToFileURL } from 'node:url'
 import {
   apply,
   buildTools,
+  COMPACT_TOOL,
   DEFAULT_FORK_THRESHOLD_RATIO,
   FORK_TOOL,
+  OCCUPANCY_TOOL,
+  REQUEST_DUPLICATE,
+  REQUEST_LATCHED,
+  REQUEST_PENDING,
+  REQUEST_USELESS,
   TOOL_NAMES,
   VERDICT_OK,
   VERDICT_REFUSED,
@@ -172,10 +194,11 @@ function harness(options = {}) {
       const decision = await next()
       return { decision, chainEnd }
     },
-    tool: () => {
-      // L'outil tel qu'il est enregistre DANS LA SURFACE d'un agent.
-      const installed = registered.at(-1)
-      assert.ok(installed !== undefined, 'aucun outil installe : rien ne peut etre appele')
+    tool: (toolName = OCCUPANCY_TOOL) => {
+      // L'outil tel qu'il est enregistre DANS LA SURFACE d'un agent, PAR SON NOM :
+      // le paquet en porte deux, et un index ne les distingue plus.
+      const installed = registered.find((entry) => entry.tool.name === toolName)
+      assert.ok(installed !== undefined, 'outil non installe : ' + toolName)
       return installed.tool
     },
     installSurface: (agent) => {
@@ -393,9 +416,17 @@ test('T-C2 : sous le seuil le fork PASSE, au-dessus il est REFUSE avec les deux 
   assert.ok(refused.decision.reason.includes('60 %'), 'le message nomme le seuil : ' + refused.decision.reason)
   assert.ok(refused.decision.reason.includes('71000'), 'le message nomme les tokens herites')
   assert.ok(refused.decision.reason.includes('100000'), 'le message nomme la fenetre')
-  assert.ok(refused.decision.reason.includes('termine ton tour'), 'le message dit QUOI FAIRE')
-  assert.ok(refused.decision.reason.includes('subagent_implement'), 'la sortie de secours est nommee')
+  // LE MESSAGE DIT LES TROIS SORTIES, et c'est delibere : un refus qui n'en
+  // nomme qu'une impose celle-la. La troisieme est le droit de ne rien faire.
+  assert.ok(refused.decision.reason.includes('trois sorties'), 'le message dit combien de sorties : ' + refused.decision.reason)
+  assert.ok(refused.decision.reason.includes(COMPACT_TOOL), 'la sortie 1 nomme l outil de DEMANDE')
+  assert.ok(refused.decision.reason.includes('turn end'), 'la sortie 1 dit QUAND elle tournera')
+  assert.ok(refused.decision.reason.includes('subagent_implement'), 'la sortie 2 est nommee')
+  assert.ok(refused.decision.reason.includes('renonce au fork'), 'la sortie 3 est nommee : rien ne t y oblige')
   assert.equal(refused.decision.info?.code, 'BOOST_FORK_OVER_THRESHOLD')
+  // ET LE REFUS N'ARME RIEN : la table des demandes reste vide — le refus informe,
+  // il ne decide pas a la place du pere.
+  assert.equal(refusing.controller.compactRequests.size, 0, 'un refus n arme AUCUNE demande de compaction')
 
   // Le refus est JOURNALISE avec les deux nombres, et COMPTE.
   const rows = entriesOf(refusing.dir, 'fork-refused')
@@ -464,46 +495,298 @@ test('T-C3b : le seuil par defaut est 0,6 et il est bien celui applique', async 
 })
 
 // --------------------------------------------------------------------------- //
-// T-C4 — la compaction differee                                                //
+// T-K — LA COMPACTION DEMANDEE, ET LE REFUS QUI N'ARME PLUS RIEN                 //
 // --------------------------------------------------------------------------- //
 
-test('T-C4 : un refus puis turn/end -> compactNow UNE fois ; un tour sans refus -> aucune', async () => {
-  const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
-  const session = fakeSession('session-c4', EVENTS)
-  const agent = fakeAgent(session, { status: 'running' })
+/**
+ * Un agent PRET A DEMANDER : vivant dans le registre du harnais, muni de SA
+ * surface, et annonce au plugin — c'est 'agent/created' qui installe les outils
+ * dans la surface de l'agent, et sans cette annonce l'outil n'existe pour lui.
+ */
+function readyAgent(harnessed, session, options = {}) {
+  const agent = fakeAgent(session, options)
   harnessed.addAgent(agent)
+  harnessed.installSurface(agent)
+  harnessed.fire('agent/created', { agent })
+  return agent
+}
 
-  // 1. Un tour SANS refus : rien ne doit etre compacte.
-  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 1 } })
-  await harnessed.controller.settled()
-  assert.equal(harnessed.compactionCalls.length, 0, 'sans refus, aucune compaction')
+/**
+ * Une mesure VIVANTE, et FIDELE sur le point qui decide tout : une compaction exige
+ * un tour FERME ('dsh-compaction-basic/lib/index.js:455-462'), donc elle ecrit ses
+ * evenements APRES le dernier 'turn/end' — le prefixe du FORK ne la voit qu'une fois
+ * un tour ferme depuis, alors que la mesure PROSPECTIVE (dernier evenement) la voit
+ * tout de suite. 'compact()' ecrit ce remplacement : il n'ombre les noeuds que si
+ * l'evenement qui le porte est DANS le prefixe mesure.
+ */
+function liveMeasure(id, { window: windowTokens, nodes, lastSeq }) {
+  // Le remplacement d'une compaction s'ecrit APRES le dernier evenement du journal
+  // ('lastSeq'), jamais apres le dernier NOEUD de surface : c'est toute la
+  // difference entre un prefixe qui la voit et un prefixe qui ne la voit pas.
+  const state = { nodes, replacement: null, seq: lastSeq ?? Math.max(...nodes.map((node) => node.seq)) }
+  /** Le remplacement qu'ecrit une compaction : un resume qui ombre les noeuds. */
+  const compact = (summaryTokens) => {
+    const seqs = state.nodes.map((node) => node.seq)
+    state.seq += 1
+    state.replacement = { seq: state.seq, startSeq: Math.min(...seqs), endSeq: Math.max(...seqs), tokens: summaryTokens }
+    return state.replacement
+  }
+  const restore = (_checkpoint, events) => {
+    const boundary = events.length === 0 ? -1 : events[events.length - 1].seq
+    const replacement = state.replacement !== null && state.replacement.seq <= boundary ? state.replacement : null
+    let total = 0
+    for (const node of state.nodes) {
+      const seq = node?.seq
+      if (typeof seq !== 'number' || seq > boundary) continue
+      if (replacement !== null && seq >= replacement.startSeq && seq <= replacement.endSeq) continue
+      const price = typeof node.tokens === 'number' ? node.tokens : node.heuristicTokens
+      if (typeof price === 'number' && Number.isFinite(price) && price > 0) total += price
+    }
+    if (replacement !== null) total += replacement.tokens
+    return {
+      snapshot: { asOfSeq: boundary, values: { contextBreakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: total } } },
+      checkpoint: {},
+    }
+  }
+  return { id, state, compact, services: { sessionProjections: projectionsOf({ window: windowTokens, restore }) } }
+}
 
-  // 2. Un refus PENDANT le tour, puis le 'turn/end' de ce tour.
+/** Une session dont le journal peut GRANDIR : une compaction y ecrit. */
+function growingSession(id, events = EVENTS) {
+  const log = events.map((event) => ({ ...event }))
+  const lastSeq = log.length === 0 ? -1 : log[log.length - 1].seq
+  return { log, lastSeq, session: { id, snapshotEvents: () => log } }
+}
+
+/** L'evenement qu'ecrit la compaction : le remplacement, APRES la frontiere du fork. */
+function replacementEvent(replacement) {
+  return {
+    type: 'user/message',
+    seq: replacement.seq,
+    data: { surfaceOp: { op: 'replace', startSeq: replacement.startSeq, endSeq: replacement.endSeq } },
+  }
+}
+
+/** La DEMANDE de compaction, telle que le MODELE l'appelle : par l'outil. */
+async function demandCompaction(harnessed, agent) {
+  return harnessed.tool(COMPACT_TOOL).execute({}, { agent })
+}
+
+test('T-K1 : un refus SEUL n appelle JAMAIS compactNow — meme a son turn/end', async () => {
+  // LE CAS QUI PROUVE LE CORRECTIF. Avant : le refus armait la compaction differee
+  // et le 'turn/end' du meme tour la declenchait — une action IRREVERSIBLE prise
+  // sans demande, tiree meme quand le pere renoncait au fork.
+  const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
+  const session = fakeSession('session-k1', EVENTS)
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
+
   const refused = await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
-  assert.equal(refused.decision.kind, 'deny')
+  assert.equal(refused.decision.kind, 'deny', 'le refus a bien eu lieu : sinon ce cas ne mesure rien')
+  // L'etat est LU avant le turn/end, mais VERIFIE apres l'assertion primaire : si
+  // l'armement revient, c'est le comportement qui doit rougir en premier.
+  const armedByRefusal = harnessed.controller.compactRequests.size
+
+  // 1. Le 'turn/end' du tour du refus.
   harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
   await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 0, 'UN REFUS SEUL N APPELLE JAMAIS compactNow')
+  assert.equal(armedByRefusal, 0, 'le refus n a retenu AUCUNE demande')
 
-  assert.equal(harnessed.compactionCalls.length, 1, 'un refus, une compaction')
-  assert.equal(harnessed.compactionCalls[0].agent, agent, 'la compaction porte sur l agent du refus')
+  // 2. Un tour entier plus tard, et un SECOND refus : toujours rien.
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 3 } })
+  const again = await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
+  assert.equal(again.decision.kind, 'deny')
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 4 } })
+  await harnessed.controller.settled()
+
+  assert.equal(harnessed.compactionCalls.length, 0, 'aucune TENTATIVE de fork ne peut armer une compaction')
+  assert.equal(entriesOf(harnessed.dir, 'fork-refused').length, 2, 'les deux refus sont bien arrives')
+  assert.equal(entriesOf(harnessed.dir, 'compact-done').length, 0)
+  assert.equal(entriesOf(harnessed.dir, 'compact-requested').length, 0)
+  assert.equal(harnessed.controller.stats.compacted, 0)
+})
+
+test('T-K2 : une DEMANDE par l outil fait appeler compactNow UNE fois, a son turn/end', async () => {
+  const growing = growingSession('session-k2')
+  const live = liveMeasure('session-k2', { window: 100_000, nodes: [{ seq: 1, tokens: 71_000 }], lastSeq: growing.lastSeq })
+  const harnessed = harness({
+    services: { tokenMeter: meterOf(live.state.nodes), ...live.services },
+    // La compaction fait son travail : elle ecrit son remplacement APRES la
+    // frontiere du fork (c'est la seule place ou une compaction peut ecrire).
+    compactNow: () => {
+      growing.log.push(replacementEvent(live.compact(5_000)))
+      return Promise.resolve({ id: 'compaction-k2' })
+    },
+  })
+  const session = growing.session
+  const agent = readyAgent(harnessed, session, { status: 'running' })
+
+  const value = await demandCompaction(harnessed, agent)
+  assert.equal(value.requested, true, 'la demande est retenue')
+  assert.equal(value.pending, true)
+  assert.equal(value.duplicate, false)
+  assert.equal(value.turn, 2, 'la demande porte le tour OUVERT du journal (tour 2)')
+  assert.equal(value.ratio, 0.71)
+  assert.equal(value.reason, REQUEST_PENDING)
+  assert.equal(harnessed.controller.compactRequests.get('session-k2').turn, 2)
+  assert.equal(entriesOf(harnessed.dir, 'compact-requested').length, 1)
+  assert.equal(harnessed.compactionCalls.length, 0, 'RIEN ne tourne pendant l appel : l agent est actif')
+
+  // Le 'turn/end' du MEME tour la solde — une fois, et sur l agent INACTIF.
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
+  await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 1, 'une demande, UNE compaction')
+  assert.equal(harnessed.compactionCalls[0].agent, agent, 'la compaction porte sur l agent de la demande')
   assert.equal(harnessed.compactionCalls[0].statusAtCall, 'idle', 'on compacte un agent INACTIF, jamais un agent actif')
   assert.equal(agent.whenIdleCalls, 1, 'l inactivite a ete attendue : a turn/end le driver est encore ouvert')
   assert.equal(harnessed.controller.stats.compacted, 1)
-  assert.equal(entriesOf(harnessed.dir, 'fork-compacted').length, 1)
+  const done = entriesOf(harnessed.dir, 'compact-done')
+  assert.equal(done.length, 1)
+  assert.equal(done[0].requestedTurn, 2)
+  assert.equal(done[0].ratioBefore, 0.71)
+  // LA FRONTIERE DU FORK N A PAS ENCORE BOUGE : le fork, lui, mesurerait encore
+  // 71 % — le cas n est donc pas vide, et c est bien la mesure PROSPECTIVE qui
+  // juge la compaction. Au cut du fork, ce cas aurait journalise 'compact-ineffective'
+  // pour une compaction qui MARCHE, et le verrou aurait refuse la demande suivante.
+  assert.equal(harnessed.controller.measureFor(session).ratio, 0.71, 'le prefixe du fork ne voit pas encore la compaction')
+  assert.equal(entriesOf(harnessed.dir, 'compact-ineffective').length, 0, 'la mesure est descendue : rien a signaler')
+  assert.equal(harnessed.controller.stats.compact_ineffective, 0)
 
-  // 3. Le tour suivant, sans refus, ne recompacte pas.
+  // Un tour suivant, sans demande : rien.
   harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 3 } })
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1, 'la compaction ne se rejoue pas toute seule')
 })
 
+test('T-K3 : deux demandes dans le MEME tour -> une seule compaction', async () => {
+  const growing = growingSession('session-k3')
+  const live = liveMeasure('session-k3', { window: 100_000, nodes: [{ seq: 1, tokens: 71_000 }], lastSeq: growing.lastSeq })
+  const harnessed = harness({
+    services: { tokenMeter: meterOf(live.state.nodes), ...live.services },
+    compactNow: () => {
+      growing.log.push(replacementEvent(live.compact(5_000)))
+      return Promise.resolve({ id: 'compaction-k3' })
+    },
+  })
+  const session = growing.session
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
+
+  const first = await demandCompaction(harnessed, agent)
+  const second = await demandCompaction(harnessed, agent)
+  assert.equal(first.reason, REQUEST_PENDING)
+  assert.equal(second.reason, REQUEST_DUPLICATE, 'la seconde demande est un DOUBLON, pas une seconde demande')
+  assert.equal(second.duplicate, true)
+  assert.equal(second.requested, true, 'la demande tient toujours : elle n a pas ete doublee')
+  assert.equal(second.turn, 2, 'elle porte le MEME tour')
+  assert.equal(harnessed.controller.stats.request_duplicate, 1)
+  assert.equal(entriesOf(harnessed.dir, 'compact-request-duplicate').length, 1)
+
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
+  await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 1, 'un tour, une compaction — quel que soit le nombre de demandes')
+  assert.equal(harnessed.controller.compactRequests.has('session-k3'), false, 'la demande est consommee par son tour')
+  assert.equal(entriesOf(harnessed.dir, 'compact-done').length, 1)
+})
+
+test('T-K4 : une demande dans un tour qui ne se ferme JAMAIS ne compacte pas un tour etranger', async () => {
+  // La regle par tour existait deja pour l'armement du refus ; elle est CONSERVEE
+  // telle quelle pour la demande. Un tour qui ne se ferme jamais (arret,
+  // annulation) ne doit pas faire compacter le tour SUIVANT, qui n'a rien a voir.
+  const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
+  const session = fakeSession('session-k4', EVENTS)
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
+
+  const value = await demandCompaction(harnessed, agent)
+  assert.equal(value.turn, 2)
+  assert.equal(harnessed.controller.compactRequests.get('session-k4').turn, 2, 'la demande porte le tour du journal')
+
+  // Le tour 2 ne se ferme JAMAIS : c'est le tour 3 qui se ferme.
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 3 } })
+  await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 0, 'un tour etranger ne solde pas la demande')
+  assert.equal(harnessed.controller.compactRequests.has('session-k4'), false, 'la demande est consommee dans TOUS les cas')
+  assert.equal(harnessed.controller.stats.request_orphaned, 1)
+  const rows = entriesOf(harnessed.dir, 'compact-request-orphaned')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].requestedTurn, 2)
+  assert.equal(rows[0].closingTurn, 3)
+})
+
+test('T-K5 : une compaction demandee qui ne descend pas le ratio est JOURNALISEE, et jamais repetee', async () => {
+  // LE DEFAUT NON MESURE : rien ne verifiait que la compaction avait fait descendre
+  // le ratio. Si elle ne le fait pas, le tour suivant refusait a nouveau et
+  // recompactait — un essai par tour, sans borne.
+  const live = liveMeasure('session-k5', { window: 100_000, nodes: [{ seq: 1, tokens: 71_000 }] })
+  const harnessed = harness({
+    services: { tokenMeter: meterOf(live.state.nodes), ...live.services },
+    // La compaction NE CHANGE RIEN a la mesure : un pere qui ne peut pas descendre.
+    compactNow: () => Promise.resolve({ id: 'compaction-k5' }),
+  })
+  const session = fakeSession('session-k5', EVENTS)
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
+
+  assert.equal((await demandCompaction(harnessed, agent)).requested, true)
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
+  await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 1)
+
+  const rows = entriesOf(harnessed.dir, 'compact-ineffective')
+  assert.equal(rows.length, 1, 'une compaction qui ne descend pas est JOURNALISEE')
+  assert.equal(rows[0].ratio, 0.71, 'le ratio d APRES')
+  assert.equal(rows[0].ratioBefore, 0.71, 'le ratio d AVANT')
+  assert.equal(rows[0].threshold, 0.6, 'le seuil, l autre valeur')
+  assert.equal(rows[0].inheritedTokens, 71_000)
+  assert.equal(rows[0].windowTokens, 100_000)
+  assert.equal(harnessed.controller.stats.compact_ineffective, 1)
+
+  // AUCUNE NOUVELLE TENTATIVE : ni un tour qui passe, ni un refus, ni une seconde
+  // demande. Un pere qui ne peut pas descendre ne paie pas une compaction par tour.
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 3 } })
+  assert.equal((await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })).decision.kind, 'deny')
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 4 } })
+  await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 1, 'un refus ne recompacte pas apres une compaction inefficace')
+
+  const second = await demandCompaction(harnessed, agent)
+  assert.equal(second.requested, false, 'une compaction inefficace ne se paie pas deux fois')
+  assert.equal(second.reason, REQUEST_LATCHED)
+  assert.equal(harnessed.controller.stats.request_latched, 1)
+  assert.equal(entriesOf(harnessed.dir, 'compact-request-refused').length, 1)
+  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 5 } })
+  await harnessed.controller.settled()
+  assert.equal(harnessed.compactionCalls.length, 1, 'AUCUNE nouvelle tentative')
+})
+
+test('T-K6 : la valeur de context_compact passe la validation du REGISTRE', async () => {
+  // Le defaut qui a tue l'outil voisin : une valeur rendue que le schema ne
+  // declare pas. 'tool.execute(...)' passe AU-DESSUS de cette couture.
+  const mounted = await mountRealRegistry({ sessionId: 'session-k6' })
+  const surface = mounted.registry.schemas(mounted.agent).map((schema) => schema.name)
+  assert.ok(surface.includes(COMPACT_TOOL), 'l outil n est pas sur la surface de l agent : ' + surface.join(', '))
+
+  const result = await registryExecute(mounted.registry, mounted.agent, COMPACT_TOOL, 't-k6-call')
+  assert.equal(result.isError, false, 'le registre a REJETE la valeur rendue : ' + String(result.error?.message))
+  assert.equal(result.value.requested, true)
+  assert.equal(result.value.pending, true)
+  assert.equal(result.value.turn, 2)
+  assert.equal(result.value.ratio, 0.71)
+  assert.equal(result.value.reason, REQUEST_PENDING)
+  assert.equal(result.value.forkThresholdRatio, 0.6)
+
+  // ET LA DEMANDE EST HONOREE : le 'turn/end' du tour porte par la valeur.
+  mounted.root.emit('session/event', mounted.session, { type: 'turn/end', data: { turn: 2 } })
+  await tick(120)
+  assert.equal(mounted.compactionCalls.length, 1, 'le registre a rendu une demande que le turn/end n a pas soldee')
+  assert.equal(mounted.compactionCalls[0].agent, mounted.agent)
+  try { await mounted.root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
+})
+
 test('T-C4b : un agent deja idle n attend pas, et un agent disparu est journalise', async () => {
   const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
   const session = fakeSession('session-c4b', EVENTS)
-  const agent = fakeAgent(session, { status: 'idle' })
-  harnessed.addAgent(agent)
-  await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
-  // Le refus appartient au tour OUVERT du journal : le tour 2 (EVENTS).
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
+  await demandCompaction(harnessed, agent)
+  // La demande appartient au tour OUVERT du journal : le tour 2 (EVENTS).
   harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1)
@@ -514,7 +797,11 @@ test('T-C4b : un agent deja idle n attend pas, et un agent disparu est journalis
     services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) },
   })
   const ghost = fakeSession('session-c4b-ghost', EVENTS)
-  await gone.preExecute({ name: FORK_TOOL, agent: fakeAgent(ghost, { status: 'idle' }), arguments: {} })
+  // L'agent n'est PAS dans le registre du harnais : seule sa surface existe.
+  const ghostAgent = fakeAgent(ghost, { status: 'idle' })
+  gone.installSurface(ghostAgent)
+  gone.fire('agent/created', { agent: ghostAgent })
+  await demandCompaction(gone, ghostAgent)
   assert.doesNotThrow(() => gone.fire('session/event', ghost, { type: 'turn/end', data: { turn: 2 } }))
   await gone.controller.settled()
   assert.equal(gone.compactionCalls.length, 0)
@@ -530,9 +817,8 @@ test('T-C4c : une compaction qui echoue est comptee et journalisee, jamais propa
     services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) },
   })
   const session = fakeSession('session-c4c', EVENTS)
-  const agent = fakeAgent(session, { status: 'idle' })
-  harnessed.addAgent(agent)
-  await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
+  await demandCompaction(harnessed, agent)
   assert.doesNotThrow(() => harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } }))
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1, 'la compaction a bien ete tentee')
@@ -541,11 +827,9 @@ test('T-C4c : une compaction qui echoue est comptee et journalisee, jamais propa
   const rows = entriesOf(harnessed.dir, 'compact-failed')
   assert.equal(rows.length, 1, 'un echec de compaction est journalise')
   assert.ok(rows[0].error.includes('idle agent'), rows[0].error)
+  // Un ECHEC n'est pas une preuve d'inefficacite : rien n'est verrouille.
+  assert.equal(harnessed.controller.ineffective.has('session-c4c'), false)
 })
-
-// --------------------------------------------------------------------------- //
-// T-C5 — l idempotence par tour                                                //
-// --------------------------------------------------------------------------- //
 
 test('T-C4d : un service de compaction illisible est journalise, jamais un rejet non gere', async () => {
   const harnessed = harness({
@@ -553,9 +837,8 @@ test('T-C4d : un service de compaction illisible est journalise, jamais un rejet
     services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) },
   })
   const session = fakeSession('session-c4d', EVENTS)
-  const agent = fakeAgent(session, { status: 'idle' })
-  harnessed.addAgent(agent)
-  await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
+  await demandCompaction(harnessed, agent)
   assert.doesNotThrow(() => harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } }))
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 0)
@@ -565,40 +848,16 @@ test('T-C4d : un service de compaction illisible est journalise, jamais un rejet
   assert.ok(rows[0].error.includes('service lookup failed: compaction'), rows[0].error)
 })
 
-test('T-C5 : deux tours refuses donnent deux compactions, jamais deux pour un meme tour', async () => {
-  const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
-  const session = fakeSession('session-c5', EVENTS)
-  const agent = fakeAgent(session, { status: 'idle' })
-  harnessed.addAgent(agent)
-
-  // DEUX refus dans le MEME tour : une seule compaction.
-  assert.equal((await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })).decision.kind, 'deny')
-  assert.equal((await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })).decision.kind, 'deny')
-  assert.equal(harnessed.controller.stats.refused, 2, 'les deux refus sont comptes')
-  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
-  await harnessed.controller.settled()
-  assert.equal(harnessed.compactionCalls.length, 1, 'un tour, une compaction — quel que soit le nombre de refus')
-
-  // Un SECOND tour refuse : une seconde compaction.
-  assert.equal((await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })).decision.kind, 'deny')
-  harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
-  await harnessed.controller.settled()
-  assert.equal(harnessed.compactionCalls.length, 2, 'deux tours refuses, deux compactions')
-  assert.equal(harnessed.controller.stats.compacted, 2)
-  assert.equal(entriesOf(harnessed.dir, 'fork-compacted').length, 2)
-})
-
-test('T-C5b : le tour d un AUTRE agent ne solde pas le refus de celui-ci', async () => {
+test('T-C5b : le tour d un AUTRE agent ne solde pas la demande de celui-ci', async () => {
   const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
   const session = fakeSession('session-c5b', EVENTS)
   const other = fakeSession('session-c5b-other', EVENTS)
-  const agent = fakeAgent(session, { status: 'idle' })
-  harnessed.addAgent(agent)
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
   harnessed.addAgent(fakeAgent(other, { status: 'idle' }))
-  await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
+  await demandCompaction(harnessed, agent)
   harnessed.fire('session/event', other, { type: 'turn/end', data: { turn: 1 } })
   await harnessed.controller.settled()
-  assert.equal(harnessed.compactionCalls.length, 0, 'le refus appartient a SA session')
+  assert.equal(harnessed.compactionCalls.length, 0, 'la demande appartient a SA session')
   harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 2 } })
   await harnessed.controller.settled()
   assert.equal(harnessed.compactionCalls.length, 1)
@@ -772,7 +1031,14 @@ test('T-C7d : le rendu texte porte le ratio et le seuil, et l inconnu se dit', (
  * surface de l'agent, puis passe par 'registry.execute(...)'. Si le schema cesse
  * de correspondre a la valeur rendue, ce cas rougit — et lui seul.
  */
-test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que execute() contourne)', async () => {
+/**
+ * LE MONTAGE REEL, partage par T-C8 et T-K6 : la vraie application cordis, le VRAI
+ * registre d'outils ('@deepseek-ai/dsh-tools') et les VRAIES portees
+ * ('@deepseek-ai/dsh-scope'), la ligne du plugin montee comme le profil la monte.
+ * 'registry.execute(...)' est la couture qui VALIDE la valeur rendue — celle que
+ * 'tool.execute(...)' contourne.
+ */
+async function mountRealRegistry({ sessionId }) {
   const modules = harnessModules()
   const entries = {
     cordis: join(modules, '@deepseek-ai', 'cordis', 'lib', 'index.js'),
@@ -787,26 +1053,35 @@ test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que exe
   const ToolRuntime = (await import(pathToFileURL(entries.tools).href)).default
 
   const root = new Context()
-  const session = fakeSession('session-c8', EVENTS)
-  const agent = { id: 'session-c8', session, status: 'idle' }
+  const session = fakeSession(sessionId, EVENTS)
+  const agent = { id: sessionId, session, status: 'idle' }
+  // Le service de compaction est fourni ICI : T-K6 prouve que la demande rendue par
+  // le registre est HONOREE, pas seulement acceptee.
+  const compactionCalls = []
   await root.plugin({
-    name: 't-c8-services',
+    name: 't-registry-services',
     apply: (ctx) => {
       // 'ToolRuntime' declare 'inject: ["systemPrompt"]' : sans ce service la
       // ligne ne s'active pas et le registre reste introuvable.
       ctx.provide('systemPrompt', { tools: () => {}, section: () => {}, getSectionOrder: () => 0 })
-      ctx.provide('agents', { get: (id) => (id === 'session-c8' ? agent : undefined), list: () => [] })
+      ctx.provide('agents', { get: (id) => (id === sessionId ? agent : undefined), list: () => [] })
       ctx.provide('tokenMeter', meterOf([{ seq: 1, tokens: 71_000 }]))
       ctx.provide('sessionProjections', projectionsOf({ window: 100_000, restore: restoreOf({ systemTokens: 0, toolsTokens: 0, messageTokens: 71_000 }) }))
+      ctx.provide('compaction', {
+        compactNow: (target, signal) => {
+          compactionCalls.push({ agent: target, signal })
+          return Promise.resolve({ id: 'compaction-t' })
+        },
+      })
     },
   })
   await root.plugin(ToolRuntime, { mode: 'native' })
   let registry
-  await root.plugin({ name: 't-c8-view', inject: ['tools'], apply: (ctx) => { registry = ctx.tools } })
+  await root.plugin({ name: 't-registry-view', inject: ['tools'], apply: (ctx) => { registry = ctx.tools } })
   assert.ok(registry !== undefined, 'le registre d outils n a pas ete capture')
 
   // La LIGNE HOTE, montee comme le profil la monte, puis l'annonce de l'agent :
-  // c'est 'agent/created' qui installe l'outil dans SA surface. Le journal part
+  // c'est 'agent/created' qui installe les outils dans SA surface. Le journal part
   // dans un dossier jetable, jamais dans le '$DSH_HOME' de la machine.
   const dir = home()
   const scope = createScope(root, agent)
@@ -815,17 +1090,26 @@ test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que exe
   await tick(30)
   root.emit('agent/created', { agent, source: 'startup' })
   await tick(150)
+  return { root, registry, agent, session, dir, compactionCalls }
+}
 
-  const surface = registry.schemas(agent).map((schema) => schema.name)
-  assert.ok(surface.includes('context_occupancy'), 'l outil n est pas sur la surface de l agent : ' + surface.join(', '))
-
-  const result = await registry.execute({
-    callId: 't-c8-call',
-    name: 'context_occupancy',
+/** L'appel par le REGISTRE — la couture ou le harnais VALIDE la valeur rendue. */
+function registryExecute(registry, agent, name, callId) {
+  return registry.execute({
+    callId: callId ?? 'call-' + name,
+    name,
     arguments: {},
     agent,
     signal: new AbortController().signal,
   })
+}
+
+test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que execute() contourne)', async () => {
+  const mounted = await mountRealRegistry({ sessionId: 'session-c8' })
+  const surface = mounted.registry.schemas(mounted.agent).map((schema) => schema.name)
+  assert.ok(surface.includes(OCCUPANCY_TOOL), 'l outil n est pas sur la surface de l agent : ' + surface.join(', '))
+
+  const result = await registryExecute(mounted.registry, mounted.agent, OCCUPANCY_TOOL, 't-c8-call')
 
   assert.equal(result.isError, false, 'le registre a REJETE la valeur rendue : ' + String(result.error?.message))
   assert.equal(result.value.inheritedTokens, 71_000)
@@ -834,7 +1118,7 @@ test('T-C8 : la valeur RELLE passe la validation du REGISTRE (la couture que exe
   assert.equal(result.value.verdict, VERDICT_REFUSED)
   assert.equal(result.value.sources.inherited, 'restore-boundary', 'sources doit survivre a la validation du registre')
   assert.equal(result.value.sources.boundarySeq, 3)
-  try { await root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
+  try { await mounted.root.dispose?.() } catch { /* le teardown ne masque jamais le verdict */ }
 })
 
 // --------------------------------------------------------------------------- //
@@ -976,24 +1260,23 @@ test('T-C9d : le nom garde est CONFIGURABLE, parce que le nom est une valeur du 
   assert.equal(entriesOf(broken.dir, 'fork-tools-invalid').length, 1)
 })
 
-test('T-C9e : un refus dans un tour qui ne se ferme JAMAIS ne compacte pas un tour etranger', async () => {
+test('T-C9e : un refus ne laisse AUCUN etat d armement, meme si son tour ne se ferme jamais', async () => {
+  // Ce cas tenait la regle par tour de l'ARMEMENT du refus ; ce role est passe a
+  // T-K4 (la demande), et il tient ici la DISPARITION de l'etat : plus de table
+  // d'armement, plus d'etape 'fork-arm-*' au journal.
   const harnessed = harness({ services: { tokenMeter: meterOf([{ seq: 1, tokens: 71_000 }]), sessionProjections: projectionsOf({ window: 100_000 }) } })
   const session = fakeSession('session-c9e', EVENTS)
-  const agent = fakeAgent(session, { status: 'idle' })
-  harnessed.addAgent(agent)
+  const agent = readyAgent(harnessed, session, { status: 'idle' })
   const refused = await harnessed.preExecute({ name: FORK_TOOL, agent, arguments: {} })
   assert.equal(refused.decision.kind, 'deny')
-  // L'armement porte le tour du refus (le tour 2, celui qu'EVENTS laisse ouvert).
-  assert.equal(harnessed.controller.refusedThisTurn.get('session-c9e'), 2)
-  // Le tour 2 ne se ferme JAMAIS : c'est le tour 3 qui se ferme.
+  assert.equal(harnessed.controller.compactRequests.size, 0, 'le refus n a rien retenu du tout')
+  // Le tour 2 du refus ne se ferme JAMAIS : c'est le tour 3 qui se ferme.
   harnessed.fire('session/event', session, { type: 'turn/end', data: { turn: 3 } })
   await harnessed.controller.settled()
-  assert.equal(harnessed.compactionCalls.length, 0, 'un tour etranger ne solde pas le refus')
-  assert.equal(harnessed.controller.refusedThisTurn.has('session-c9e'), false, 'l armement est consomme')
-  const rows = entriesOf(harnessed.dir, 'fork-arm-orphaned')
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].armedTurn, 2)
-  assert.equal(rows[0].closingTurn, 3)
+  assert.equal(harnessed.compactionCalls.length, 0, 'un tour etranger ne solde RIEN : il n y avait rien a solder')
+  assert.equal(harnessed.controller.stats.request_orphaned, 0, 'aucun orphelin : rien n avait ete demande')
+  const steps = journalEntries(harnessed.dir).map((entry) => entry.step)
+  assert.equal(steps.some((step) => step.startsWith('fork-arm')), false, 'plus aucune etape d armement : ' + steps.join(', '))
 })
 
 // --------------------------------------------------------------------------- //

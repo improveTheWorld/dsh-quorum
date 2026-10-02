@@ -27,8 +27,9 @@
 //      chaine n'est pas coupee (un listener place en aval voit l'appel) ;
 //   4. le FAUX NEGATIF : sans mesure ('unknown'), le fork n'est PAS refuse, et le
 //      journal du plugin le dit ('fork-unguarded') ;
-//   5. la COMPACTION DIFFEREE : apres un refus, 'turn/end' -> 'compactNow' appele
-//      UNE fois ; un tour sans refus -> jamais.
+//   5. la COMPACTION DEMANDEE : un refus puis 'turn/end' -> 'compactNow' JAMAIS
+//      (le correctif) ; la DEMANDE par l'outil, puis 'turn/end' -> UNE fois ; un
+//      tour sans demande -> jamais.
 //
 // Sortie 0 seulement si les cinq mesures concordent. Toute divergence est un
 // PROBE-FAIL nomme : une decouverte, pas un silence.
@@ -124,6 +125,10 @@ async function main() {
       ctx.provide('compaction', {
         compactNow: (agent, signal) => {
           compactionCalls.push({ agent, statusAtCall: agent.status, signalAborted: signal?.aborted === true })
+          // Une compaction REELLE remplace une region par un resume : la mesure
+          // redescend. Sans cela, la boucle fermee du plugin journaliserait
+          // 'compact-ineffective' — vrai du faux, faux du vrai.
+          meterNodes = [{ seq: 1, tokens: 20_000 }]
           return Promise.resolve({ id: 'compaction-probe' })
         },
       })
@@ -199,7 +204,10 @@ async function main() {
     },
   })
   await tick(30)
+  // LES DEUX AGENTS : l'outil de demande est installe par agent, et l'etape 5
+  // demande depuis la RACINE (celle dont le refus de l'etape 2 vient).
   root.emit('agent/created', { agent: workerAgent, source: 'spawn' })
+  root.emit('agent/created', { agent: rootAgent, source: 'startup' })
   await tick(150)
 
   if (registry === undefined) throw new Error('le registre d outils n a pas ete capture : la composition du probe est invalide')
@@ -269,19 +277,44 @@ async function main() {
     + (bodyCalls.filter((name) => name === FORK).length > blindBodiesBefore ? 'OUI' : 'non'))
   if (blind.isError !== false) failures.push('sans mesure, le fork est REFUSE : on ne devine pas, on s abstient — ' + String(blind.error?.message))
 
-  // ---- 5. LA COMPACTION DIFFEREE -------------------------------------------
-  // Le refus de l etape 2 a arme la compaction du tour courant.
+  // ---- 5. LA COMPACTION DEMANDEE -------------------------------------------
+  //
+  // LE CORRECTIF, mesure ici : le refus de l etape 2 n arme PLUS RIEN. Le
+  // 'turn/end' de son tour ne doit RIEN declencher — avant, il declenchait une
+  // compaction que personne n avait demandee, sur une simple TENTATIVE de fork.
+  meterAvailable = true
+  windowTokens = WINDOW
+  meterNodes = [{ seq: 1, tokens: 71_000 }]
   root.emit('session/event', rootAgent.session, { type: 'turn/end', data: { turn: 2 } })
   await tick(120)
   const afterRefusal = compactionCalls.length
-  say('5-compaction', 'apres un refus puis turn/end : compactNow appele ' + afterRefusal + ' fois'
-    + (afterRefusal > 0 ? ' sur l agent ' + (compactionCalls[0].agent === rootAgent ? 'du refus' : 'INATTENDU') + ' (status=' + compactionCalls[0].statusAtCall + ')' : ''))
-  // Un tour SANS refus : la garde n a rien arme, rien ne doit partir.
+  say('5-compaction', 'apres un refus puis turn/end : compactNow appele ' + afterRefusal + ' fois (attendu 0 : un refus n arme rien)')
+  if (afterRefusal !== 0) failures.push('le refus a ARME une compaction : compactNow a ete appele ' + afterRefusal + ' fois sans qu aucune demande n ait ete faite')
+
+  // LA DEMANDE, par l OUTIL et par le REGISTRE : la seule voie qui retient une
+  // compaction. Un agent qui appelle un outil est actif, donc rien ne part ici.
+  const demand = await call('context_compact', rootAgent)
+  say('5-compaction', 'registry.execute(context_compact) -> isError=' + demand.isError
+    + ' · requested=' + (demand.value?.requested ?? '(aucune valeur)')
+    + ' · turn=' + (demand.value?.turn ?? '(aucune valeur)')
+    + ' · ratio=' + (demand.value?.ratio ?? '(aucune valeur)')
+    + ' · reason=' + (demand.value?.reason ?? '(aucune valeur)'))
+  if (demand.isError === true) failures.push('la DEMANDE de compaction est rejetee par le registre : ' + String(demand.error?.message))
+  if (demand.value?.requested !== true) failures.push('la demande rendue par le registre ne retient RIEN : ' + JSON.stringify(demand.value ?? null))
+  if (compactionCalls.length !== 0) failures.push('la compaction a tourne PENDANT l appel de l outil, alors que l agent est actif')
+
+  // Honoree au 'turn/end' du tour DE LA DEMANDE.
+  root.emit('session/event', rootAgent.session, { type: 'turn/end', data: { turn: 2 } })
+  await tick(120)
+  const afterDemand = compactionCalls.length
+  say('5-compaction', 'apres la DEMANDE puis turn/end : compactNow appele ' + afterDemand + ' fois'
+    + (afterDemand > 0 ? ' sur l agent ' + (compactionCalls[0].agent === rootAgent ? 'de la demande' : 'INATTENDU') + ' (status=' + compactionCalls[0].statusAtCall + ')' : ''))
+  // Un tour SANS demande : la garde n a rien retenu, rien ne doit partir.
   root.emit('session/event', rootAgent.session, { type: 'turn/end', data: { turn: 3 } })
   await tick(120)
-  say('5-compaction', 'apres un tour SANS refus : total compactNow = ' + compactionCalls.length)
-  if (afterRefusal !== 1) failures.push('apres un refus, compactNow a ete appele ' + afterRefusal + ' fois au lieu d une')
-  if (compactionCalls.length !== 1) failures.push('un tour sans refus a declenche une compaction (total ' + compactionCalls.length + ')')
+  say('5-compaction', 'apres un tour SANS demande : total compactNow = ' + compactionCalls.length)
+  if (afterDemand !== 1) failures.push('apres une DEMANDE, compactNow a ete appele ' + afterDemand + ' fois au lieu d une')
+  if (compactionCalls.length !== 1) failures.push('un tour sans demande a declenche une compaction (total ' + compactionCalls.length + ')')
 
   // ---- 6. LE RETOUR REEL DE L OUTIL D OCCUPATION, PAR LE REGISTRE ----------
   //
@@ -318,8 +351,18 @@ async function main() {
   }
   if (refusedRows.length !== 1) failures.push('le journal ne porte pas UNE ligne fork-refused (recu ' + refusedRows.length + ')')
   if (unguardedRows.length !== 1) failures.push('le journal ne porte pas la ligne fork-unguarded du faux negatif (recu ' + unguardedRows.length + ')')
-  if (steps.filter((step) => step === 'fork-compacted').length !== 1) {
-    failures.push('le journal ne porte pas UNE ligne fork-compacted (recu ' + steps.filter((step) => step === 'fork-compacted').length + ')')
+  if (steps.filter((step) => step === 'compact-requested').length !== 1) {
+    failures.push('le journal ne porte pas UNE ligne compact-requested (recu ' + steps.filter((step) => step === 'compact-requested').length + ')')
+  }
+  if (steps.filter((step) => step === 'compact-done').length !== 1) {
+    failures.push('le journal ne porte pas UNE ligne compact-done (recu ' + steps.filter((step) => step === 'compact-done').length + ')')
+  }
+  // Le refus n a laisse AUCUN etat d armement : plus aucune etape 'fork-arm-*'.
+  if (steps.some((step) => step.startsWith('fork-arm'))) {
+    failures.push('le journal porte encore une etape d armement : ' + steps.join(', '))
+  }
+  if (steps.filter((step) => step === 'compact-ineffective').length !== 0) {
+    failures.push('la compaction a ete jugee INEFFICACE alors que le faux compactNow fait descendre la mesure')
   }
 
   // Observation, hors verdict : l outil est-il sur la surface de l agent ?
@@ -342,4 +385,4 @@ if (failures.length > 0) {
   console.log('PROBE-FAIL — ' + failures.join(' ; '))
   process.exit(1)
 }
-console.log('PROBE-PASS — l admission de tools/pre-execute sur une ligne HOTE sans tag est MESUREE : le listener recoit les appels, le refus atteint le registre avec son motif, le passage suit next(), le faux negatif s abstient, et la compaction differee part une fois par tour refuse')
+console.log('PROBE-PASS — l admission de tools/pre-execute sur une ligne HOTE sans tag est MESUREE : le listener recoit les appels, le refus atteint le registre avec son motif et n arme RIEN, le passage suit next(), le faux negatif s abstient, et la compaction ne part QUE sur demande (outil context_compact), une fois par tour')
