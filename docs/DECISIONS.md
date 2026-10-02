@@ -37,8 +37,9 @@ propositions **retirees** (un registre qui cache ses revirements est un document
 
 | # | decision | pourquoi |
 |---|---|---|
-| D17 | Frein budgetaire sur **entree non cachee + sortie**, par **arbre**, via `ctx.tools.guard()` | compteurs disjoints verifies sur 30 894 enregistrements ; la garde est monotone, « no guard can force-allow » ; le cache pese 92 % des tokens et 11 % de la facture |
-| D18 | Le frein arrete de **construire**, jamais d'**achever** | couper une verification en cours produit un verdict faux, pire qu'un depassement |
+| D17 | ~~Frein budgetaire par **arbre**, via `ctx.tools.guard()`~~ — **RETIRE le 2026-10-02** | **« je peux avoir plusieurs arbres independants »** : un frein local ne plafonne rien de global, il se contourne en ouvrant une session. Jamais construit. Remplace par D22 |
+| D18 | ~~Le frein arrete de construire, jamais d'achever~~ — **RETIRE avec D17** | la regle reste juste, mais elle qualifiait un frein qui n'existe plus. Elle resservira si un plafond GLOBAL voyait le jour |
+| D22 | **Alerte de debit GLOBALE en DOLLARS**, fenetre glissante d'une heure, deux seuils avec hysteresis, **elle n'empeche rien** | portee globale (tous arbres, tous processus, lue sur les journaux de session) ; le debit moyen sur l'heure tolere les pics par construction ; spec separee : `docs/ALERTE-DEBIT.md` |
 | D19 | La **profondeur reste a 1** tant que le canal n'existe pas | un petit-fils muet serait indistinguable d'un agent bloque (silence mesure : p50 373 s, max 112 min) |
 | D20 | **Ordre** : canal -> verdict a cible -> profondeur | chaque etape est la condition de lisibilite de la suivante |
 | D21 | **Une seule edition du profil** puis un redemarrage | `dsh-hmr` surveille `package.json` et `cordis.patch.yml` : editer en cours de session force la relecture de toutes les couches |
@@ -271,9 +272,10 @@ CONSTRUITS et vivants : le job possede par la racine (detached-jobs, porte du pr
                         la garde anti-surrogate (montee, 26 cas, journal de reparation)
                         la garde du fork par occupation (7e ligne : exposition + refus + compaction
                           differee ; admission MESUREE a la couture du registre)
-CONCU, PAS CONSTRUIT   : le frein hors cache. `tools.guard` n'apparait NULLE PART dans le code
-                        (seulement dans ce document et EVOLUTIONS.md). C'est l'etape 2 de D20,
-                        et elle n'est pas commencee.
+RETIRE le 2026-10-02    : le frein hors cache par arbre. Il n'a jamais ete construit, et l'argument
+                        qui le tue est decisif : plusieurs arbres independants -> un frein local ne
+                        plafonne rien. Remplace par une ALERTE GLOBALE en dollars (D22,
+                        `docs/ALERTE-DEBIT.md`) qui, elle, n'empeche rien.
 ```
 
 **Et une lecon transverse, payee cinq fois en une journee** : les defauts ne vivent pas dans les
