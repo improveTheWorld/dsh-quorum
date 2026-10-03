@@ -1,6 +1,6 @@
 # dsh-boost — le bundle agrégateur du mode Quorum
 
-**Le mode Quorum** est une famille de **trois** presets d'agent DSH pour le raisonnement profond multi-agents : un orchestrateur décompose la demande, délègue à des sous-agents **isolés par rôle** (`subagent_investigate`, `subagent_implement`, `subagent_verify`) et ne livre rien avant qu'un vérificateur indépendant ait essayé de falsifier le résultat. Les trois presets ne diffèrent que par la **présentation des outils** : `preset-quorum-ptc` en **PTC** (*Programmatic Tool Calling* : l'agent écrit un programme TypeScript qui appelle les outils), `preset-quorum-standard` en appels d'outils **natifs**, `preset-quorum-minimal` sur le **socle nu**. Le mode s'ajoute aux presets livrés (`standard`,
+**Le mode Quorum** est une famille de **trois** presets d'agent DSH pour le raisonnement profond multi-agents : un orchestrateur décompose la demande, délègue à des sous-agents **isolés par rôle** (`subagent_investigate`, `subagent_implement`, `subagent_verify`) et ne livre rien avant qu'un vérificateur indépendant ait essayé de falsifier le résultat. Les trois presets ne diffèrent que par la **présentation des outils** : `preset-quorum-ptc` en **PTC** (*Programmatic Tool Calling* : l'agent écrit un programme TypeScript qui appelle les outils), `preset-quorum-standard` en appels d'outils **natifs**, `preset-quorum-shell` sur le **socle nu**. Le mode s'ajoute aux presets livrés (`standard`,
 `ptc`, `minimal`, `cordis`) et se choisit dans *Settings → Agent Presets*.
 
 Ce dépôt **consolide les sources et la documentation du mode Quorum** en un seul endroit, et publie
@@ -71,10 +71,13 @@ Les deux passent par le gestionnaire **composé**, donc par `pnpmCommand` :
 dsh --profile <profil> --dump-config
 ```
 
-Attendu : les ids du mode, **chacun exactement une fois** — les **trois** presets de la famille `quorum` (`preset-quorum-ptc` en PTC, `preset-quorum-standard` en outils natifs, `preset-quorum-minimal` sur le socle nu), puis `boost-job-relay`, `boost-status-command`, `dsh-detached-jobs`, `dsh-guard-surrogate`,
-`dsh-boost-channel`, `dsh-boost-context-budget`, `dsh-boost-lessons`. Mesure du **2026-10-03** : sur
-`boost-test` **2999** lignes composées et les **dix** compteurs à **1** (sur `web` : **3048** lignes et
-les **dix** compteurs à **1**). Un id à **2** est le symptôme de l'exclusion mutuelle violée (section
+Attendu : les ids du mode, **chacun exactement une fois** — les **trois** presets de la famille `quorum` (`preset-quorum-ptc` en PTC, `preset-quorum-standard` en outils natifs, `preset-quorum-shell` sur le socle nu), puis `boost-job-relay`, `boost-status-command`, `dsh-detached-jobs`, `dsh-guard-surrogate`,
+`dsh-boost-channel`, `dsh-boost-context-budget`, `dsh-boost-lessons`. Mesure du **2026-10-03** : les
+**dix** compteurs à **1** et **0** ligne `not found`, sur `web` comme sur `boost-test`. **Le nombre total
+de lignes du dump n'est PAS un contrôle** : mesuré **2768**, **3048** et **3072** pour le même fichier,
+selon qu'on compte un tableau, un découpage brut, ou les lignes vides. Un contrôle qui dépend de la méthode
+de comptage est pire qu'un contrôle qui s'abstient — les deux qui décident sont le compte par id et
+l'absence de `not found`. Un id à **2** est le symptôme de l'exclusion mutuelle violée (section
 suivante) ; un id à **0** veut dire que la ligne n'est pas montée.
 
 ### 5. Choisir le preset
@@ -105,7 +108,7 @@ Les deux formes s'excluent donc :
 
 | Nom | Rôle | Cas de test | Invocation |
 |---|---|---|---|
-| `@local/dsh-boost-mode`<br>`packages/boost-mode/` | Déclare les **trois presets d'agent** de la famille `quorum` — `preset-quorum-ptc` (PTC), `preset-quorum-standard` (outils natifs), `preset-quorum-minimal` (socle nu) : protocole en trois phases, persona de l'orchestrateur, et trois outils de délégation isolés par rôle. Le `name` de cette ligne est un nom de paquet npm (`@deepseek-ai/dsh-agent-preset`), pas un fichier. | **aucun** — la ligne est un patch de preset, il n'y a pas de suite (0 cas) | `cd packages\boost-mode` puis `node --test` |
+| `@local/dsh-boost-mode`<br>`packages/boost-mode/` | Déclare les **trois presets d'agent** de la famille `quorum` — `preset-quorum-ptc` (PTC), `preset-quorum-standard` (outils natifs), `preset-quorum-shell` (socle nu) : protocole en trois phases, persona de l'orchestrateur, et trois outils de délégation isolés par rôle. Le `name` de cette ligne est un nom de paquet npm (`@deepseek-ai/dsh-agent-preset`), pas un fichier. | **aucun** — la ligne est un patch de preset, il n'y a pas de suite (0 cas) | `cd packages\boost-mode` puis `node --test` |
 | `@local/dsh-boost-relay`<br>`packages/boost-relay/` | Relais **hôte** : remonte au propriétaire d'un arbre les *settlements* des jobs lancés à l'intérieur de ses sous-agents (angle mort du registre, dont la propriété est clôturée par l'id de session propriétaire). | **14/14** — `test/notice.test.mjs` 5, `test/journal.test.mjs` 9 | `cd packages\boost-relay` puis `node --test` |
 | `@local/dsh-boost-status`<br>`packages/boost-status/` | Commande **hôte** `/boost-status` : l'état de délégation vivant d'une session, lu sur le plan de commande de l'UI — donc **elle répond même pendant qu'un appel d'outil est en vol**. | **10/10** — `test/status.test.mjs` | `cd packages\boost-status` puis `node --test` |
 | `@local/dsh-detached-jobs`<br>`packages/detached-jobs/` | Ajoute `run_detached` : un job d'arrière-plan possédé par la **racine** de session et non par l'agent demandeur, donc qui survit à un worker jetable. Ligne **hôte** : c'est la seule portée non scopée qui peut posséder un job au nom de la racine. | **56/56** — `test/root.test.mjs` 10 (propriété), `apply` 19 (activation, contexte strict), `shell` 8, `spill` 9, `purge` 10 | `cd packages\detached-jobs` puis `node --test` ; sondes : `node tools\probe-profile-import.mjs` (résolution par la jonction) et `node tools\probe-spill-announce.mjs` (annonce par le vrai registre) |
@@ -126,7 +129,7 @@ lignes**, recopiées à l'identique depuis les huit patches d'origine — mêmes
 
 Un seul écart, imposé par le chargeur : le `name` d'une ligne est résolu **relativement au fichier de
 patch**. Depuis la racine, les sept lignes fichier portent donc `./packages/<paquet>/lib/index.js` au
-lieu de `./lib/index.js`. Les lignes `preset-quorum-ptc`, `preset-quorum-standard` et `preset-quorum-minimal` gardent leur nom de paquet npm.
+lieu de `./lib/index.js`. Les lignes `preset-quorum-ptc`, `preset-quorum-standard` et `preset-quorum-shell` gardent leur nom de paquet npm.
 
 `test/aggregate.test.mjs` **exige** cette égalité et échoue à la moindre dérive : ids identiques,
 `config` identiques (comparés en JSON canonique), `name` résolvant vers le **même module** que dans le
