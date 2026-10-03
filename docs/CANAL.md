@@ -15,8 +15,17 @@ tours de la mere ouverts juste apres un avis     : 82,5 %
 cout d'un tour de mere contre la mediane        : 3 641 068 vs 127 798 hors cache  (~28x)
 ```
 
-Et l'ordre des signaux n'est pas connu, il est **devine** — le relais ecrit au lecteur :
-« treat this one as a duplicate unless its report predates the job ». C'est un pari, pas un fait.
+Et l'ordre des signaux n'etait pas connu, il etait **devine** — le relais ecrivait au lecteur :
+« treat this one as a duplicate unless its report predates the job ». C'etait un pari, pas un fait.
+
+**Corrige le 2026-10-03, sur mesure.** Le relais ne parie plus : il MESURE `ownerState` et **s'abstient**
+quand le proprietaire du job est vivant (`bail: owner-already-notified`), parce que ce proprietaire a recu
+le sien. Et quand le repli designe un NON-proprietaire, l'avis **nomme le proprietaire reel**, ne promet
+plus `job_output` (mesure : la lecture est refusee, « belongs to another session ») et ne parle plus de
+doublon. Ce qui a fonde le changement : **53 avis en deux jours, 98 % des cas `producer` dont le
+proprietaire etait vivant, 11,5 % lus** — et le relais s'abstenait DEJA dans un cas de redondance
+(`owner-is-the-root`, 15 fois). La perte est reelle et elle est ecrite dans le README du paquet :
+les lectures utiles disparues avec les avis supprimes ne sont pas prouvees inutiles.
 
 Le cout de cette conception n'est donc pas l'ergonomie : **chaque avis recu coute un tour de mere**, et
 la mere est l'agent le plus cher de l'arbre. Le volume du canal **fixe** la facture.

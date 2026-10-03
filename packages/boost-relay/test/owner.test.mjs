@@ -17,6 +17,20 @@
 // `rootOf` is UNCHANGED and stays the path (`listDescendants` never sees a forked session,
 // and `agents.list()` is documented as intermittent). What these cases pin is the fallback
 // that ARBITRATES with the live registry only when the header root is not alive.
+//
+// MEASURED 2026-10-03 (18 491 journal records, 2 days), two rules changed under these cases:
+//   - a `producer` settlement whose owner is RUNNING is now ABSTAINED ON
+//     (`{step:'bail', why:'owner-already-notified'}`). 52 of the 53 relayed notices were
+//     `producer` and 100 % of those carried `ownerState: running` — the owner receives that
+//     settlement natively, and the relay was sending it one labelled "treat this one as a
+//     duplicate". T-U1 and T-U3 asserted that delivery and are INVERTED here, on purpose.
+//     "Alive" is narrowed to `running`, the only state the measurement observed: an `idle`
+//     owner still receives the notice (the live `pwsh-1` of 2026-10-02 was relayed to an
+//     `idle` session), which is why T-U4 and T-U5 set the owner `idle` and not `running`.
+//   - the fallback can address a session that is NOT the job's owner, and the notice text now
+//     branches on that identity (see notice.test.mjs T-V4).
+// A fixture that keeps the OWNER out of the live registry is the ordinary relay case — the
+// worker returned — and remains the case in which a notice is owed.
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -120,16 +134,23 @@ async function settle(ownerId, spec, options = {}) {
   return { sent: registry === undefined ? [] : registry.sent, journal: records() }
 }
 
-test('T-U1 a LIVE durable root is the owner, and no fallback is written', async () => {
+// INVERTED (see the header): this case used to assert that a `producer` settlement of a
+// RUNNING owner was delivered to a live root. That is the 52/53 redundancy measured on
+// 2026-10-03 — the child receives the notice natively. The resolution itself is unchanged
+// and is still asserted: no fallback record, and the root is the live durable one.
+test('T-U1 a LIVE durable root with a RUNNING owner: the resolution holds, and the relay abstains', async () => {
   const { sent, journal } = await settle('session-t1-child', {
     'session-t1-root': { status: 'idle' },
     'session-t1-child': { status: 'running', parent: 'session-t1-root' },
   })
-  assert.equal(sent.length, 1, 'the live root must receive the notice')
-  assert.equal(sent[0].to, 'session-t1-root')
+  assert.deepEqual(sent, [], 'a running owner collects its own settlement: the notice is not owed')
   assert.equal(journal.some((record) => record.step === 'owner-fallback'), false,
     'a normal resolution must not write a fallback record')
-  assert.equal(journal.some((record) => record.step === 'relayed' && record.root === 't1-root'), true)
+  const gate = journal.find((record) => record.step === 'bail' && record.why === 'owner-already-notified')
+  assert.ok(gate !== undefined, 'the abstention is journalled, like every other decision')
+  assert.equal(gate.ownerState, 'running', 'and carries the measurement it rests on')
+  assert.equal(gate.root, 't1-root', 'the root resolution is the same one as before')
+  assert.equal(journal.some((record) => record.step === 'relayed'), false)
 })
 
 test('T-U2 a parent ABSENT from the headers renders the LIVE ancestor, never the unknown id', async () => {
@@ -146,18 +167,26 @@ test('T-U2 a parent ABSENT from the headers renders the LIVE ancestor, never the
     'an id the headers know nothing about must never receive the notice')
 })
 
-test('T-U3 a DEAD durable root with a live ancestor gives the highest live one', async () => {
+// INVERTED (see the header): with the owner RUNNING, the highest live ancestor is still
+// resolved — the record proves it — but nothing is delivered, because the owner receives its
+// own settlement. "Must not be silent" is now satisfied by the JOURNALLED gate, not by an
+// injection: the resolution is still not allowed to vanish without a trace.
+test('T-U3 a DEAD durable root with a live ancestor: resolved to the highest live one, and abstained on', async () => {
   const { sent, journal } = await settle('session-t3-leaf', {
     'session-t3-mid': { status: 'idle', parent: 'session-t3-dead' },
     'session-t3-leaf': { status: 'running', parent: 'session-t3-mid' },
   })
-  assert.equal(sent.length, 1, 'the continued-session case must not be silent')
-  assert.equal(sent[0].to, 'session-t3-mid', 'the middle of the chain is the highest LIVE ancestor')
+  assert.deepEqual(sent, [], 'the running owner is told natively; the relay would duplicate it')
   const fallback = journal.find((record) => record.step === 'owner-fallback')
   assert.equal(fallback?.headerRoot, 't3-dead')
-  assert.equal(fallback?.liveOwner, 't3-mid')
+  assert.equal(fallback?.liveOwner, 't3-mid', 'the middle of the chain is still the highest LIVE ancestor')
+  const gate = journal.find((record) => record.step === 'bail' && record.why === 'owner-already-notified')
+  assert.ok(gate !== undefined, 'the continued-session case must not be silent about its silence')
+  assert.equal(gate.root, 't3-mid')
 })
 
+// The owner is `idle`, which the gate does NOT abstain on — a session between turns still
+// has to be told about a job nothing else can report. The gate keys on `running` alone.
 test('T-U4 a dead root and NO live ancestor gives the ownerId — and the notice IS delivered', async () => {
   const { sent, journal } = await settle('session-t4-leaf', {
     'session-t4-leaf': { status: 'idle', parent: 'session-t4-dead' },
@@ -172,9 +201,11 @@ test('T-U4 a dead root and NO live ancestor gives the ownerId — and the notice
 })
 
 test('T-U5 the fallback is JOURNALLED, and a normal resolution never writes it', async () => {
+  // The OWNER is out of the live registry (it returned — the ordinary relay case); the root
+  // stays live. `running` here would hit the new gate and prove nothing about the fallback.
   const normal = await settle('session-t1-child', {
     'session-t1-root': { status: 'running' },
-    'session-t1-child': { status: 'running', parent: 'session-t1-root' },
+    'session-t1-child': { status: 'stopped', parent: 'session-t1-root' },
   })
   assert.equal(normal.sent.length, 1, 'the normal path still delivers')
   assert.equal(normal.journal.some((record) => record.step === 'owner-fallback'), false,

@@ -109,7 +109,7 @@ Les deux formes s'excluent donc :
 | Nom | Rôle | Cas de test | Invocation |
 |---|---|---|---|
 | `@local/dsh-boost-mode`<br>`packages/boost-mode/` | Déclare les **trois presets d'agent** de la famille `quorum` — `preset-quorum-ptc` (PTC), `preset-quorum-standard` (outils natifs), `preset-quorum-shell` (socle nu) : protocole en trois phases, persona de l'orchestrateur, et trois outils de délégation isolés par rôle. Le `name` de cette ligne est un nom de paquet npm (`@deepseek-ai/dsh-agent-preset`), pas un fichier. | **aucun** — la ligne est un patch de preset, il n'y a pas de suite (0 cas) | `cd packages\boost-mode` puis `node --test` |
-| `@local/dsh-boost-relay`<br>`packages/boost-relay/` | Relais **hôte** : remonte au propriétaire d'un arbre les *settlements* des jobs lancés à l'intérieur de ses sous-agents (angle mort du registre, dont la propriété est clôturée par l'id de session propriétaire). | **14/14** — `test/notice.test.mjs` 5, `test/journal.test.mjs` 9 | `cd packages\boost-relay` puis `node --test` |
+| `@local/dsh-boost-relay`<br>`packages/boost-relay/` | Relais **hôte** : remonte au propriétaire d'un arbre les *settlements* des jobs lancés à l'intérieur de ses sous-agents (angle mort du registre, dont la propriété est clôturée par l'id de session propriétaire). | **28/28** — `test/notice.test.mjs` 13, `test/journal.test.mjs` 9, `test/owner.test.mjs` 6. Le compte de 14 datait d'avant `owner.test.mjs`, jamais recomposé ; les deux correctifs du 2026-10-03 ajoutent **8 cas** à `notice.test.mjs` (T-V1 à T-V6, T-V5b, T-V5c) et **inversent 4 cas existants** qui encodaient la règle d'avant (3 dans `notice.test.mjs`, 1 dans `owner.test.mjs` : T-U1) — le détail et les raisons sont en tête des deux fichiers de test | `cd packages\boost-relay` puis `node --test` |
 | `@local/dsh-boost-status`<br>`packages/boost-status/` | Commande **hôte** `/boost-status` : l'état de délégation vivant d'une session, lu sur le plan de commande de l'UI — donc **elle répond même pendant qu'un appel d'outil est en vol**. | **10/10** — `test/status.test.mjs` | `cd packages\boost-status` puis `node --test` |
 | `@local/dsh-detached-jobs`<br>`packages/detached-jobs/` | Ajoute `run_detached` : un job d'arrière-plan possédé par la **racine** de session et non par l'agent demandeur, donc qui survit à un worker jetable. Ligne **hôte** : c'est la seule portée non scopée qui peut posséder un job au nom de la racine. | **56/56** — `test/root.test.mjs` 10 (propriété), `apply` 19 (activation, contexte strict), `shell` 8, `spill` 9, `purge` 10 | `cd packages\detached-jobs` puis `node --test` ; sondes : `node tools\probe-profile-import.mjs` (résolution par la jonction) et `node tools\probe-spill-announce.mjs` (annonce par le vrai registre) |
 | `@local/dsh-guard-surrogate`<br>`packages/guard-surrogate/` | Répare les **surrogates UTF-16 non appariés** dans les résultats d'outil, sur le waterfall `tools/post-execute`, **avant** l'écriture au journal : un seul surrogate isolé empoisonne toutes les requêtes suivantes en `HTTP 400 INVALID_REQUEST`. | **26/26** — `test/guard.test.mjs` | `cd packages\guard-surrogate` puis `node --test` |
@@ -163,7 +163,7 @@ node --test tools/tests.test.mjs             # racine (lecteur de logs)    22/22
 Puis, **le répertoire du paquet comme dossier courant** :
 
 ```powershell
-cd packages\boost-relay;          node --test   # 20/20
+cd packages\boost-relay;          node --test   # 28/28
 cd packages\boost-status;         node --test   # 10/10
 cd packages\detached-jobs;        node --test   # 61/61
 cd packages\guard-surrogate;      node --test   # 26/26
@@ -181,6 +181,11 @@ des compteurs de la table ci-dessus. **Ne pas** écrire `node --test test/` : le
 échoue en `MODULE_NOT_FOUND`.
 
 Un `0/0` se lit « non déclenché », pas « vérifié » : `packages/boost-mode` n'embarque aucune suite.
+
+Recompté le **2026-10-03** : `node --test` à la racine rend **279/279**. Les 231 ci-dessus sont la mesure
+du 2026-10-02 et restent telles quelles ; le **Δ +48** vient de comptes qui avaient dérivé depuis (le
+`boost-relay` seul valait déjà 20 et non 14), plus les **8 cas** ajoutés par les correctifs de relais du
+2026-10-03 — que les 231 ne comptabilisent donc pas.
 
 Le test anti-dérive doit pouvoir **échouer**. Recette de falsification :
 

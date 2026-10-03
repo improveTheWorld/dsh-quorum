@@ -26,8 +26,18 @@
  * - Wakes are budgeted per root (MAX_WAKES_PER_ROOT) because a woken turn may
  *   start the work whose completion wakes it again; past the budget the notice
  *   is injected into the next step instead of opening a turn.
- * - Nothing is relayed while the owner agent is `running`: that agent receives
- *   the notice natively in its next step, so relaying would only duplicate it.
+ * - Nothing is relayed while the owner agent is `running` for a `producer`
+ *   settlement: that agent receives the notice natively in its next step, so
+ *   relaying would only duplicate it. That is the existing
+ *   `owner-is-the-root` doctrine applied to the second case, not a new policy:
+ *   the relay already abstains when the notice would be redundant, and a
+ *   notice it labels itself `duplicate` is the same redundancy uncovered.
+ *   (`teardown`, `kill`, and an owner the registry cannot produce are the cases
+ *   where nothing else can carry the notice — see the bail in `deliver`.)
+ * - A notice names whoever it is really addressed to. The `owner-fallback`
+ *   below can hand the notice to a session that is NOT the job's owner, and the
+ *   text then must not claim the recipient already has the job — nor promise
+ *   `job_output` on it, which that session cannot call.
  *
  * Read-only with respect to the workspace: it observes registry events and
  * writes one inbox message. It never starts, stops, or mutates a job.
@@ -382,6 +392,12 @@ export function apply(ctx) {
     // failure in this mode, and skipping it made this plugin useless in the very
     // case it was written for.
     const teardown = event.cause === 'teardown'
+    // A kill is the third and last member of `JobSettleCause`
+    // (`dsh-jobs/lib/types/types.d.ts`: `'producer' | 'kill' | 'teardown'`). It is
+    // NOT the producer's own settlement — something outside the owner decided to
+    // end the job — so it is notified for the same reason a teardown is: the owner
+    // may never learn it from the registry's own delivery.
+    const kill = event.cause === 'kill'
     // An awaited settlement needs no notice, and the registry says so itself.
     //
     // `awaited` is part of the settled event (`dsh-jobs/lib/types/types.d.ts:192-202`):
@@ -399,26 +415,22 @@ export function apply(ctx) {
     // a promise the registry can keep — and that notice is this plugin's reason to
     // exist.
     if (event.awaited === true && !teardown) return trace(state, { step: 'skip', why: 'awaited-by-owner', job: job.id })
-    // No skip for a running owner, and this was the real defect.
+    // A running owner is NOT skipped here, and the reason lives one level down in
+    // `deliver`: whether a running owner duplicates the notice depends on the
+    // CAUSE, and only there are both facts in hand. A `producer` settlement of a
+    // RUNNING owner is a duplicate (the relay used to send it anyway, labelled
+    // "treat this one as a duplicate" — see the gate in `deliver`); a `teardown`
+    // or `kill` is not, because the owner is being disposed and "already
+    // delivered" is not a promise the registry can keep. Handling it here by
+    // ownerState alone would either resurrect the duplicate or lose the teardown
+    // notice that is this plugin's reason to exist.
     //
-    // The original rule — "a running owner collects the notice itself in its next
-    // step, so relaying would duplicate it" — is only sound if that owner will
-    // ACT on the notice. A worker explicitly told to launch a job and return
-    // without waiting will not: it is still running when the job settles, it
-    // receives the notice natively, ignores it as instructed, and returns a report
-    // that predates the output. The parent then never learns, which is the exact
-    // gap this plugin exists to close.
-    //
-    // Live proof that the case is real: `skip owner-running pwsh-1 owner=94e2b3a0`
-    // in the relay's own decision log. A duplicate notice for the worker costs one
-    // line; a lost notice costs the parent the whole result. Deduplication and the
-    // wake budget already bound the cost.
     // The live state of the job's OWNER, measured when the registry can answer and 'absent'
     // when the line received no registry at all (the degradation path must not throw here).
     const owner = liveAgents(ctx)?.get(ownerId)
     const ownerState = owner === undefined ? 'absent' : owner.status
     trace(state, { step: 'settled', job: job.id, owner: short(ownerId), cause: event.cause ?? 'normal', ownerState })
-    void deliver(job, ownerId, event.cause, ownerState, teardown)
+    void deliver(job, ownerId, event.cause, ownerState, teardown, kill)
   }
 
   // ONE catch-all, plus one per distinct live agent — in the shape the registry filters on.
@@ -482,7 +494,7 @@ export function apply(ctx) {
   if (typeof ctx.effect === 'function') ctx.effect(() => () => { for (const dispose of disposers) dispose() })
 
   /** Resolve the live root a job's owner descends from, then notify it. */
-  async function deliver(job, ownerId, cause, ownerState, teardown = false) {
+  async function deliver(job, ownerId, cause, ownerState, teardown = false, kill = false) {
     // `inject` no longer declares `subagents`: the resolution reads durable
     // headers, so a missing service must not short-circuit the relay. An earlier
     // version bailed here, which would have defeated the fix before it ran.
@@ -587,11 +599,58 @@ export function apply(ctx) {
       state.skipped++
       return trace(state, { step: 'bail', why: 'owner-is-the-root', job: job.id, root: short(ownerRootId) })
     }
+    // B — a `producer` settlement whose owner is ALIVE is a duplicate, and is
+    // abstained on here exactly as `owner-is-the-root` above abstains.
+    //
+    // Same redundancy, second case: `owner-is-the-root` says "the owner started
+    // this job and receives it natively, so do not send it back"; a running owner
+    // is the same situation one level down — it receives its own settlement
+    // natively at its next step. That is precisely why the text below already
+    // calls itself a duplicate, and measured 2026-10-03 the relay sent it anyway:
+    // 53 notices relayed in two days, 52 of them `producer`, and 100 % of those
+    // carried `ownerState: running`. Action rate 6/52 = 11.5 %, one of the six
+    // reads refused ("job ... belongs to another session"). This is the existing
+    // doctrine, extended — not a new policy.
+    //
+    // What is NOT a duplicate, and is still NOTIFIED: cause `teardown` (the job
+    // died with its worker — the expensive case this plugin exists for) and cause
+    // `kill` (a decision taken elsewhere); and any settlement whose owner is
+    // ABSENT from the live registry, because then no other agent can carry the
+    // notice at all.
+    //
+    // "Alive" is narrowed to `running`, which is the only state the measurement
+    // ever observed here: of the 52 relayed `producer` notices, 100 % carried
+    // `ownerState: running`. An `idle` owner is alive but between turns, and
+    // abstaining on it was MEASURED to destroy the notices this plugin exists for:
+    // the live `pwsh-1` of 2026-10-02 was relayed to `7fa9e670`, whose status was
+    // `idle`, so a wider gate swallowed it. Running is the state in which the
+    // owner is provably about to receive its own settlement.
+    //
+    // The cost is assumed and written down, not hidden: 4 useful reads out of 52
+    // (8 %) disappear with this rule and the measurement says nothing about
+    // whether they mattered.
+    //
+    // The abstention is JOURNALLED like every other decision. A silence without a
+    // motive is indistinguishable from a breakdown.
+    if (cause === 'producer' && !kill && ownerState === 'running') {
+      state.skipped++
+      return trace(state, {
+        step: 'bail',
+        why: 'owner-already-notified',
+        job: job.id,
+        owner: short(ownerId),
+        ownerState,
+        root: short(ownerRootId),
+      })
+    }
     {
       const entry = headers().get(ownerId)
+      // Is the session receiving this notice the job's OWNER? Only the fallback can
+      // answer no, and the text below branches on it (see `notice`).
+      const ownerIsRecipient = ownerRootId === ownerId
       relayed.add(job.id)
       const message = createUserMessage({
-        content: [{ type: 'text', text: notice(job, entry, cause, ownerState, teardown) }],
+        content: [{ type: 'text', text: notice(job, entry, cause, ownerState, teardown, ownerIsRecipient) }],
         source: { kind: 'tool-jobs', form: 'notice', summary: `relay ${job.id}` },
       })
       const spent = wakes.get(ownerRootId) ?? 0
@@ -605,7 +664,10 @@ export function apply(ctx) {
         state.last = `${job.id} → injection dans ${short(ownerRootId)}`
       }
       state.relays++
-      trace(state, { step: 'relayed', job: job.id, owner: short(ownerId), root: short(ownerRootId), via: root.status === 'idle' ? 'wake' : 'inject' })
+      // `recipientIsOwner` is journalled with the delivery: a false value here is the
+      // only way the fallback's text differs, and a journal that hid it could not be
+      // interrogated when a notice turns out to have misnamed its audience.
+      trace(state, { step: 'relayed', job: job.id, owner: short(ownerId), root: short(ownerRootId), recipientIsOwner: ownerIsRecipient, via: root.status === 'idle' ? 'wake' : 'inject' })
       return
     }
   }
@@ -641,16 +703,51 @@ export function apply(ctx) {
     return byId.get(ownerId)
   }
 
-  function notice(job, entry, cause, ownerState, teardown = false) {
+  /**
+   * The notice text. It branches on TWO facts, and the second one is identity.
+   *
+   * `ownerState` is the state of the job's OWNER. `ownerIsRecipient` says whether
+   * the session reading this text IS that owner. When the `owner-fallback` above
+   * elected a higher live ancestor, it did not — and the text that ignored this
+   * asserted two things that were false, measured on 2026-10-03 for `pwsh-238`
+   * (owner `949882e3`, relayed to `7fa9e670`):
+   *   - "it receives this notice itself, so treat this one as a duplicate": the
+   *     recipient is not the owner, so it receives nothing of the kind;
+   *   - "Read its output with `job_output`": MEASURED impossible from there —
+   *     `job_output(pwsh-238)` answers "job pwsh-238 belongs to another session",
+   *     because the job is fenced to the owner's session id.
+   * A notice that promises an impossible read is worse than no notice: it sends
+   * the agent straight into a failure. The owner is therefore NAMED, `job_output`
+   * is not promised, and nothing calls the notice a duplicate.
+   *
+   * @param ownerIsRecipient - true when the session this notice is delivered to IS
+   *   `entry.id`, the job's owner — the case where the original text stands unchanged.
+   */
+  function notice(job, entry, cause, ownerState, teardown = false, ownerIsRecipient = true) {
     const label = entry.label === undefined ? '' : ` (« ${entry.label} »)`
     const detail = job.detail ?? job.progress
     const who = `subagent ${short(entry.id)}${label}`
+    // Unchanged whenever the recipient IS the owner, and only then.
+    // The opening clause of the closing sentence. Identity, not state, decides it:
+    // 'That job belongs to the subagent' is what a recipient that IS the owner reads,
+    // and the original text stands unchanged in that case.
+    const own = ownerIsRecipient
+      ? 'That job belongs to the subagent'
+      // Naming the owner is the whole point; the second sentence states only what is
+      // measured — this session is live and is not the owner. The owner is not always
+      // OFF that chain (it can be running above the chosen link), so nothing is claimed
+      // about where it is.
+      : `That job belongs to ${who} — and you are not that session. This notice reached you as the live session the fallback elected to carry it.`
     if (teardown) {
       // The expensive case, and the reason this plugin exists.
       return `[boost-relay] Background job ${job.id} (${job.kind}${job.label === '' ? '' : `: ${job.label}`}) started inside ${who} was **terminated when that subagent settled** — a background job dies with a one-shot worker. It did not run to completion, no result will ever arrive, and anything you were waiting for is not happening.\n`
-        + 'This costs a whole campaign when it goes unnoticed. Two remedies: start a long job from THIS session (`run_in_background: true` here), where it survives the worker; or have the worker wait for its job instead of returning. Do not delegate a long job to a worker and let it go.'
+        + (ownerIsRecipient
+          ? 'This costs a whole campaign when it goes unnoticed. Two remedies: start a long job from THIS session (`run_in_background: true` here), where it survives the worker; or have the worker wait for its job instead of returning. Do not delegate a long job to a worker and let it go.'
+          // The remedies are the owner's: neither session can read this job's output,
+          // and the one above it can only re-delegate.
+          : `${own} \`job_output\` is not available from here — it is fenced to the owner's session. What you can do is find out what that job was worth: \`send_message\` to ${who} when it is a continuable one, or re-delegate the work with this fact in the brief.`)
     }
-    return `[boost-relay] Background job ${job.id} (${job.kind}${job.label === '' ? '' : `: ${job.label}`}) launched inside ${who} finished [status: ${job.status}${cause === undefined ? '' : `, ${cause}`}]${detail === undefined ? '' : ` — ${detail}`}.\n`
+    const base = `[boost-relay] Background job ${job.id} (${job.kind}${job.label === '' ? '' : `: ${job.label}`}) launched inside ${who} finished [status: ${job.status}${cause === undefined ? '' : `, ${cause}`}]${detail === undefined ? '' : ` — ${detail}`}.\n`
       // What the owner was doing is MEASURED — `ownerState` comes from the registry's
       // view of the live agent — and it decides the sentence. The previous text
       // asserted "the subagent had already returned when it settled" unconditionally,
@@ -658,8 +755,21 @@ export function apply(ctx) {
       // on 2026-09-29: a notice claimed the verifier had returned, and `list_agents`
       // showed it running, waiting on the very job being announced.
       + (ownerState === 'running'
-        ? 'That job belongs to the subagent, which was still RUNNING when the job settled — it receives this notice itself, so treat this one as a duplicate unless its report predates the job. If the result matters: `send_message` to that subagent (when it is a continuable one) or re-delegate the check with this output in the brief.'
-        : 'That job belongs to the subagent, which is no longer running, so its report predates this output. If the result matters: `send_message` to that subagent (when it is a continuable one) or re-delegate the check with this output in the brief.')
+        ? `${own}, which was still RUNNING when the job settled`
+        : `${own}, which is no longer running`)
+    // The closing advice branches on the SAME identity. "it receives this notice
+    // itself" and the duplicate warning are FALSE for a fallback recipient — only the
+    // owner receives the notice the registry delivers — and `job_output` is not
+    // offered there, because MEASURED it answers "job … belongs to another session".
+    const advice = ownerIsRecipient
+      ? (ownerState === 'running'
+        // Teardown returned above, so this line is only ever read by the running owner.
+        // The gate in `deliver` normally abstains before reaching here: this text is the
+        // shape the notice had, kept for the paths the gate does not cover.
+        ? ' — it receives this notice itself, so treat this one as a duplicate unless its report predates the job. If the result matters: `send_message` to that subagent (when it is a continuable one) or re-delegate the check with this output in the brief.'
+        : ' — so its report predates this output. If the result matters: `send_message` to that subagent (when it is a continuable one) or re-delegate the check with this output in the brief.')
+      : ' — so its report predates this output, if it ever wrote one. That output is not readable from here, and this is not a duplicate of anything you received: `send_message` to that subagent when it is a continuable one, or re-delegate the check with the job name in the brief.'
+    return base + advice
   }
 
   ctx.inject(['commands'], (commandCtx) => {
