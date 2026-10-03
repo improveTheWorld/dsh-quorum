@@ -13,7 +13,7 @@
        schedule_* ont disparu du process vivant - mesure du 30/09)
     5. purge des trois entrees mortes du patch de profil (time-context, schedule, ui-schedule)
     6. jonctions : materialise node_modules\@local\dsh-boost vers C:\CodeSource\dsh-boost
-    7. verification : dsh --profile web --dump-config, les six ids attendus, chacun une fois
+    7. verification : dsh --profile web --dump-config, les dix ids attendus, chacun une fois
 .EXAMPLE
   pwsh -File cutover-profile.ps1            # montre ce qui serait fait
   pwsh -File cutover-profile.ps1 -Apply     # le fait, puis affiche la verification
@@ -140,7 +140,7 @@ Write-Host "  $link -> C:\CodeSource\dsh-boost"
 
 Write-Host '=== 7. verification ===' -ForegroundColor Cyan
 $out = & dsh --profile $Profile --dump-config 2>&1
-$ids = @('preset-boost','boost-job-relay','boost-status-command','dsh-detached-jobs','dsh-guard-surrogate','dsh-boost-channel','dsh-boost-context-budget','dsh-boost-lessons')
+$ids = @('preset-quorum-ptc','preset-quorum-standard','preset-quorum-shell','boost-job-relay','boost-status-command','dsh-detached-jobs','dsh-guard-surrogate','dsh-boost-channel','dsh-boost-context-budget','dsh-boost-lessons')
 foreach ($id in $ids) {
   $n = ($out | Select-String -Pattern ('^- id: ' + [regex]::Escape($id) + '$') | Measure-Object).Count
   $color = 'Green'; if ($n -ne 1) { $color = 'Red' }

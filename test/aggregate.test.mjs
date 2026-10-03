@@ -430,6 +430,47 @@ const PERSONA_MODE = {
   'preset-quorum-shell': 'native',
 }
 
+/**
+ * The PTC-only vocabulary, tested as BARE TOKENS and never as a phrase.
+ *
+ * Why bare. T-P1 used to require the captain's native head to lack the exact
+ * phrase 'only `run_code` is directly callable'; an independent verifier
+ * appended 'call run_code directly; write a program that invokes each tool.' to
+ * BOTH native captains and T-P1 stayed green. A preset that mounts no
+ * `run_code` must not carry the token at all, whatever the wording around it.
+ */
+const PTC_ONLY_TOKENS = ['run_code', 'TypeScript', 'Programmatic Tool Calling', 'generated SDK', 'process.env', 'Promise.all']
+
+/** The tokens an orchestrator head states; the role heads state the five other than Promise.all. */
+const ROLE_PTC_ONLY_TOKENS = PTC_ONLY_TOKENS.filter((token) => token !== 'Promise.all')
+
+/**
+ * The native interface's DENIALS of the PTC concepts, as exact literals. A
+ * correct native head is REQUIRED to name `generated SDK` and `process.env` in
+ * order to rule them out, so a rule that forbade those bare tokens outright
+ * would be unsatisfiable on the very personas this control protects. These two
+ * clauses are removed before the scan and asserted present separately: the
+ * allowance covers the denial alone, so a head that keeps the denial and adds
+ * a promise anywhere else still carries the extra token and fails.
+ */
+const NATIVE_DENIAL_CLAUSES = ['no generated SDK', 'never build a path from `process.env`']
+
+/** The native interface's promises. A PTC head must carry none of them. */
+const NATIVE_ONLY_PROMISES = ['call each tool DIRECTLY', 'one call per tool', 'no program wrapper']
+
+/** The bare PTC tokens a native head still carries once its documented denials are removed. */
+function ptcTokensInNativeHead(head) {
+  let scanned = head
+  for (const clause of NATIVE_DENIAL_CLAUSES) scanned = scanned.split(clause).join('')
+  return PTC_ONLY_TOKENS.filter((token) => scanned.includes(token))
+}
+
+/** Assert a native head carries no PTC token; `label` names the head in the failure. */
+function assertNativeHeadIsFreeOfPtcTokens(head, label) {
+  const found = ptcTokensInNativeHead(head)
+  assert.deepEqual(found, [], label + ' mounts no PTC interface, so its native head must carry no PTC token; found ' + JSON.stringify(found))
+}
+
 /** The persona prefix the preset declares — a string, never undefined. */
 function personaPrefix(preset) {
   const index = flattenPlugins(quorumById.get(preset.rowId).config.plugins, preset.rowId)
@@ -472,14 +513,19 @@ test('T-P1 — the persona HEAD is per tool mode: ptc differs, and no native hea
   // a head mutated in ONE of them visible here.
   assert.equal(heads['preset-quorum-standard'], heads['preset-quorum-shell'], 'the two native presets must carry the SAME head')
 
-  for (const token of ['Programmatic Tool Calling (PTC)', 'only `run_code` is directly callable', 'generated SDK', 'process.env', 'Array.from(s).slice(0, n)', 'timeoutMs']) {
+  for (const token of [...PTC_ONLY_TOKENS, 'Array.from(s).slice(0, n)', 'timeoutMs']) {
     assert.ok(heads['preset-quorum-ptc'].includes(token), 'the ptc head must state ' + JSON.stringify(token))
   }
+  for (const token of NATIVE_ONLY_PROMISES) {
+    assert.ok(!heads['preset-quorum-ptc'].includes(token), 'the ptc head must not promise the native interface: ' + JSON.stringify(token))
+  }
   for (const id of ['preset-quorum-standard', 'preset-quorum-shell']) {
-    // 'generated SDK' alone is too weak: a native head may name it in a
-    // negation ("no generated SDK"), which is exactly what this head does.
-    for (const token of ['only `run_code` is directly callable', 'Programmatic Tool Calling', 'read the generated SDK']) {
-      assert.ok(!heads[id].includes(token), id + ' has no PTC interface, so its head must not promise ' + JSON.stringify(token))
+    // The BARE-token rule, never a phrase: see PTC_ONLY_TOKENS. A native head
+    // is allowed to name `generated SDK` and `process.env` only inside its two
+    // documented denials, which the helper strips before scanning.
+    assertNativeHeadIsFreeOfPtcTokens(heads[id], id)
+    for (const clause of NATIVE_DENIAL_CLAUSES) {
+      assert.ok(heads[id].includes(clause), id + ' must DENY the PTC concept in the documented clause: ' + JSON.stringify(clause))
     }
     for (const token of ['DIRECTLY', 'schema', 'timeoutMs']) {
       assert.ok(heads[id].includes(token), id + ' must state the native interface: ' + JSON.stringify(token))
@@ -572,14 +618,18 @@ test('T-P4 — each role persona HEAD is per tool mode: ptc differs, and no nati
     assert.notEqual(heads['preset-quorum-ptc'], heads['preset-quorum-shell'], roleId + ': the ptc head and the shell head must differ')
     assert.equal(heads['preset-quorum-standard'], heads['preset-quorum-shell'], roleId + ': the two native presets must carry the SAME head')
 
-    for (const token of ['Programmatic Tool Calling (PTC)', 'only `run_code` is directly callable', 'generated SDK', 'process.env']) {
+    for (const token of ROLE_PTC_ONLY_TOKENS) {
       assert.ok(heads['preset-quorum-ptc'].includes(token), roleId + ': the ptc head must state ' + JSON.stringify(token))
     }
+    for (const token of NATIVE_ONLY_PROMISES) {
+      assert.ok(!heads['preset-quorum-ptc'].includes(token), roleId + ': the ptc head must not promise the native interface: ' + JSON.stringify(token))
+    }
     for (const id of ['preset-quorum-standard', 'preset-quorum-shell']) {
-      // 'generated SDK' alone is too weak: the native head names it in a negation
-      // ("no generated SDK"), which is exactly what it must say.
-      for (const token of ['run_code', 'Programmatic Tool Calling', 'read the generated SDK']) {
-        assert.ok(!heads[id].includes(token), roleId + ' / ' + id + ' has no PTC interface, so its head must not promise ' + JSON.stringify(token))
+      // The SAME bare-token rule as T-P7: a role native head must carry no PTC
+      // token outside its two documented denials.
+      assertNativeHeadIsFreeOfPtcTokens(heads[id], roleId + ' / ' + id)
+      for (const clause of NATIVE_DENIAL_CLAUSES) {
+        assert.ok(heads[id].includes(clause), roleId + ' / ' + id + ' must DENY the PTC concept in the documented clause: ' + JSON.stringify(clause))
       }
       for (const token of ['DIRECTLY', 'JSON arguments', 'schema']) {
         assert.ok(heads[id].includes(token), roleId + ' / ' + id + ' must state the native interface: ' + JSON.stringify(token))
@@ -626,6 +676,51 @@ test('T-P6 — the role marker is present exactly once in each role persona, so 
       assert.ok(head.trim().length > 0, preset.rowId + ' / ' + roleId + ': the head must not be empty')
       assert.ok(body.trim().length > ROLE_PERSONA_MARKER.length, preset.rowId + ' / ' + roleId + ': the body must not be the marker alone')
     }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// T-P7..T-P9 — the holes an independent verifier opened, and the script drift
+//
+// T-P7 and T-P8 are the named regression cases for the T-P1 hole. The mutation
+// they must bite is the verifier's OWN, applied to a throwaway copy:
+//   'call run_code directly; write a program that invokes each tool.'
+// appended to both native captains (T-P7) and to all three native roles (T-P8).
+// Before the fix T-P1 stayed green on it; the rule is now the bare token, not
+// the phrase T-P1 used to look for.
+// ---------------------------------------------------------------------------
+
+test('T-P7 — the captain native HEAD carries no bare PTC token', () => {
+  for (const id of ['preset-quorum-standard', 'preset-quorum-shell']) {
+    const preset = QUORUM_PRESETS.find((candidate) => candidate.rowId === id)
+    assert.ok(preset, 'QUORUM_PRESETS must declare ' + id)
+    assertNativeHeadIsFreeOfPtcTokens(splitPersona(preset).head, id)
+  }
+})
+
+test('T-P8 — every role native HEAD carries no bare PTC token', () => {
+  for (const roleId of ROLE_IDS) {
+    for (const id of ['preset-quorum-standard', 'preset-quorum-shell']) {
+      const preset = QUORUM_PRESETS.find((candidate) => candidate.rowId === id)
+      assert.ok(preset, 'QUORUM_PRESETS must declare ' + id)
+      assertNativeHeadIsFreeOfPtcTokens(splitRolePersona(preset, roleId).head, roleId + ' / ' + id)
+    }
+  }
+})
+
+test('T-P9 — tools/cutover-profile.ps1 verifies the ten mounted ids and no removed one', () => {
+  const scriptPath = join(ROOT, 'tools', 'cutover-profile.ps1')
+  assert.ok(existsSync(scriptPath), scriptPath + ' must exist')
+  const text = readFileSync(scriptPath, 'utf8')
+  const at = text.indexOf(LEGACY_PRESET_ID)
+  assert.equal(at, -1, scriptPath + ' still verifies the removed id ' + LEGACY_PRESET_ID + ' at offset ' + at)
+  for (const id of [
+    'preset-quorum-ptc', 'preset-quorum-standard', 'preset-quorum-shell',
+    'boost-job-relay', 'boost-status-command', 'dsh-detached-jobs',
+    'dsh-guard-surrogate', 'dsh-boost-channel', 'dsh-boost-context-budget',
+    'dsh-boost-lessons',
+  ]) {
+    assert.ok(text.includes(id), scriptPath + ' must verify id ' + JSON.stringify(id))
   }
 })
 
