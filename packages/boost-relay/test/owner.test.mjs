@@ -19,16 +19,16 @@
 // that ARBITRATES with the live registry only when the header root is not alive.
 //
 // MEASURED 2026-10-03 (18 491 journal records, 2 days), two rules changed under these cases:
-//   - a `producer` settlement whose owner is RUNNING is now ABSTAINED ON
-//     (`{step:'bail', why:'owner-already-notified'}`). 52 of the 53 relayed notices were
-//     `producer` and 100 % of those carried `ownerState: running` — the owner receives that
-//     settlement natively, and the relay was sending it one labelled "treat this one as a
-//     duplicate". T-U1 and T-U3 asserted that delivery and are INVERTED here, on purpose.
-//     "Alive" is narrowed to `running`, the only state the measurement observed: an `idle`
-//     owner still receives the notice (the live `pwsh-1` of 2026-10-02 was relayed to an
-//     `idle` session), which is why T-U4 and T-U5 set the owner `idle` and not `running`.
-//   - the fallback can address a session that is NOT the job's owner, and the notice text now
-//     branches on that identity (see notice.test.mjs T-V4).
+//   - a `producer` settlement whose owner is ALIVE — present in the live registry, so
+//     `running` OR `idle` — is now ABSTAINED ON (`{step:'bail', why:'owner-already-notified'}`).
+//     52 of the 53 relayed notices were `producer` and 100 % of those carried
+//     `ownerState: running` — the owner receives that settlement natively, and the relay was
+//     sending it one labelled "treat this one as a duplicate". T-U1 and T-U3 asserted that
+//     delivery and are INVERTED here, on purpose; T-U4 covers the `idle` half of the union
+//     (a first draft narrowed to `running` on a FALSE claim that the live `pwsh-1` of
+//     2026-10-02 was `idle` — the journal gives it `ownerState: running`).
+//   - the fallback can address a session that is NOT the job's owner, and the notice text
+//     branches on that identity AND on `cause` (see notice.test.mjs T-V4, T-V5, T-V7, T-V8).
 // A fixture that keeps the OWNER out of the live registry is the ordinary relay case — the
 // worker returned — and remains the case in which a notice is owed.
 import assert from 'node:assert/strict'
@@ -185,27 +185,30 @@ test('T-U3 a DEAD durable root with a live ancestor: resolved to the highest liv
   assert.equal(gate.root, 't3-mid')
 })
 
-// The owner is `idle`, which the gate does NOT abstain on — a session between turns still
-// has to be told about a job nothing else can report. The gate keys on `running` alone.
-test('T-U4 a dead root and NO live ancestor gives the ownerId — and the notice IS delivered', async () => {
+// The owner is `idle` — ALIVE, since `AgentStatus = 'idle' | 'running'` — so the gate DOES
+// abstain on it: the registry delivers its own settlement to it. The resolution still keeps
+// the owner itself (the fallback record proves it); only the delivery is withheld.
+test('T-U4 a dead root and NO live ancestor keeps the ownerId — and the ALIVE owner is abstained on', async () => {
   const { sent, journal } = await settle('session-t4-leaf', {
     'session-t4-leaf': { status: 'idle', parent: 'session-t4-dead' },
   })
-  assert.equal(sent.length, 1, 'with no live ancestor the owner itself is the owner, and it is told')
-  assert.equal(sent[0].to, 'session-t4-leaf')
+  assert.deepEqual(sent, [], 'an idle owner is ALIVE: it receives its own settlement, so the relay abstains')
   const fallback = journal.find((record) => record.step === 'owner-fallback')
   assert.equal(fallback?.headerRoot, 't4-dead')
-  assert.equal(fallback?.liveOwner, 't4-leaf')
+  assert.equal(fallback?.liveOwner, 't4-leaf', 'with no live ancestor the owner itself is retained')
+  const gate = journal.find((record) => record.step === 'bail' && record.why === 'owner-already-notified')
+  assert.ok(gate !== undefined, 'the abstention on an idle owner must be journalled')
+  assert.equal(gate.ownerState, 'idle', 'the record carries the state the decision rests on')
   assert.equal(journal.some((record) => record.step === 'bail' && record.why === 'owner-is-the-root'), false,
     'the owner-is-the-root fence covers a LIVE durable root only')
 })
 
 test('T-U5 the fallback is JOURNALLED, and a normal resolution never writes it', async () => {
   // The OWNER is out of the live registry (it returned — the ordinary relay case); the root
-  // stays live. `running` here would hit the new gate and prove nothing about the fallback.
+  // stays live. The owner is simply ABSENT: `'stopped'` is not a value the harness produces
+  // (`AgentStatus = 'idle' | 'running'`), and a fixture built on it measures nothing.
   const normal = await settle('session-t1-child', {
     'session-t1-root': { status: 'running' },
-    'session-t1-child': { status: 'stopped', parent: 'session-t1-root' },
   })
   assert.equal(normal.sent.length, 1, 'the normal path still delivers')
   assert.equal(normal.journal.some((record) => record.step === 'owner-fallback'), false,

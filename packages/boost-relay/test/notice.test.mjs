@@ -20,19 +20,26 @@
 // A SECOND campaign, measured 2026-10-03 on 18 491 journal records / 2 days, found the
 // same redundancy in the case that rule left open:
 //   53 notices relayed — 52 `producer`, and 100 % of those carried `ownerState: running`;
-//   action rate 6/52 = 11.5 %, one of the six reads refused ("belongs to another session").
+//   the 53rd (`pwsh-163`, `teardown`) carried `ownerState: idle` and is still notified,
+//   because the rule covers `producer` only.
 // The relay already abstains when the notice would be redundant (15 × `owner-is-the-root`),
 // yet it sent one it labelled itself "treat this one as a duplicate". T-V1 applies the
 // existing doctrine to that second case; T-V2/T-V3 pin what is still notified (the
-// expensive case, and the owner nothing else can reach); T-V6 guards the shape where the
-// fallback lands on the owner itself.
+// expensive case, and the owner nothing else can reach).
 //
 // T-V4 pins the OTHER defect the same campaign exposed: the notice text branched on the
-// OWNER's state but never on WHO the recipient is. When the fallback designates another
-// agent, "it receives this notice itself" and "Read its output with job_output" are both
-// false — the second one MEASURED refused (`job_output(pwsh-238)` → "belongs to another
-// session"). T-V5 is the non-regression of that branch: the recipient that IS the owner
-// still reads the text unchanged.
+// OWNER's state and on WHO the recipient is, but NEVER on `cause`. When the fallback
+// designates another agent, "it receives this notice itself" and "Read its output with
+// job_output" are both false — the second one MEASURED refused (`job_output(pwsh-238)` →
+// "belongs to another session"). And on a `kill` whose owner was still running the text
+// held two irreconcilable sentences ("still RUNNING" / "its report predates this output")
+// and told the owner to treat as a duplicate the very notice a `kill` exists to carry.
+// T-V5, T-V6 and T-V8 pin the identity/cause corners; T-V7 walks the whole eight-corner
+// table of `noticeText` directly.
+//
+// "Alive" is the harness's whole `AgentStatus = 'idle' | 'running'` union, not `running`
+// alone: T-V1, T-U1 and T-U3 pin the abstention for a `running` owner, T-U4 for an
+// `idle` one, T-V6 for the measured `pwsh-1`.
 //
 // NOT ADAPTED SILENTLY — the two pre-existing cases below whose assertion was INVERTED,
 // and why:
@@ -301,15 +308,16 @@ test('T-V4b the teardown text branches on identity too: the non-owner variant na
   assert.equal(journal.find((record) => record.step === 'relayed').recipientIsOwner, false)
 })
 
-// T-V5 — non-regression of A. The recipient IS the owner: the text is the original one,
-// and `recipientIsOwner` is DIFFERENT from "a fallback ran". A fallback that elects the
-// owner itself is case 1, not case 2: the recipient is the session the job belongs to.
+// T-V5 — identity corner for a DELIVERED notice. The recipient IS the owner: no owner
+// naming, no "you are not that session" — while the `cause` still shapes the text, which
+// is the 2026-10-03 fix. A fallback that elects the owner itself is identity case 1, not
+// case 2.
 //
-// A `kill` is used to reach the delivery: with a `producer` cause this shape is exactly
-// T-V6, and with an owner that is its own header root the `owner-is-the-root` fence
-// correctly suppresses the notice (a session that started the job receives it natively),
-// so neither of those reaches the text under test.
-test('T-V5 the owner-as-recipient text is unchanged: no owner naming, no identity sentence', async () => {
+// A `kill` is used to reach the delivery: a `producer` settlement of this same live owner
+// is gated (T-V1/T-V6), and an owner that is its own header root hits the
+// `owner-is-the-root` fence, so neither reaches the text under test. On a `kill` the text
+// must NEVER say "treat this one as a duplicate" nor "it receives this notice itself".
+test('T-V5 the owner-as-recipient text of a kill: no duplicate claim, no identity sentence', async () => {
   const event = {
     type: 'settled',
     job: { id: 'pwsh-v5', kind: 'pwsh', label: 'une commande', owner: 'session-t6-owner', status: 'completed', detail: 'exit code: 0' },
@@ -321,9 +329,12 @@ test('T-V5 the owner-as-recipient text is unchanged: no owner naming, no identit
   assert.equal(delivered[0].to, 'session-t6-owner', 'the fallback elected the owner: it is the recipient')
   const text = textOf(delivered[0].message)
   assert.match(text, /^\[boost-relay\] Background job pwsh-v5 \(pwsh: une commande\) launched inside subagent t6-owner finished \[status: completed, kill\] — exit code: 0\./)
-  assert.match(text, /That job belongs to the subagent, which is no longer running — so its report predates this output\. If the result matters: `send_message` to that subagent/)
+  assert.match(text, /which was idle — between two turns — when the job settled/, 'idle is ALIVE and named as such, not "no longer running"')
+  assert.match(text, /The settlement was a `kill`, decided outside the producer/)
+  assert.match(text, /This notice is not a duplicate of anything you received/)
+  assert.doesNotMatch(text, /treat this one as a duplicate/, 'a kill exists because the registry may never deliver it')
+  assert.doesNotMatch(text, /it receives this notice itself/, 'the refuted sentence must not reappear')
   assert.doesNotMatch(text, /you are not that session/, 'the identity sentence belongs to the fallback-to-ANOTHER-session branch only')
-  assert.doesNotMatch(text, /it receives this notice itself/, 'and the duplicate warning must not reappear for an owner that is not running')
   assert.equal(journal.some((record) => record.step === 'owner-fallback'), true, 'the fallback did run — and still elected the owner')
   assert.equal(journal.find((record) => record.step === 'relayed').recipientIsOwner, true)
 })
@@ -357,26 +368,114 @@ test("T-V5b a root receiving a returned child's notice is told it is not the own
   assert.equal(seen.journal.find((record) => record.step === 'relayed').recipientIsOwner, false)
 })
 
-// T-V6 — the measured `pwsh-1` of 2026-10-02: the fallback elected the OWNER ITSELF
-// (owner 7fa9e670, liveOwner 7fa9e670). That is identity case 1, so the ordinary text and
-// a real delivery — and it proves the gate does not confuse "fallback happened" with
-// "the recipient is someone else".
-test('T-V6 a fallback that elects the owner itself is treated as case 1: normal text, delivered', async () => {
+// T-V6 — the measured `pwsh-1` of 2026-10-02, whose ONE journal record is
+//   {"step":"settled","job":"pwsh-1","owner":"7fa9e670","cause":"producer","ownerState":"running"}
+// (the first draft of B claimed `idle`; the journal does not, and no record attaches
+// `7fa9e670` to `idle`). The fallback still elects the owner itself — the resolution is
+// proven by the record — and the `producer` + ALIVE gate then abstains, because that
+// owner receives its own settlement natively.
+test('T-V6 a producer settlement whose fallback elects the ALIVE owner is abstained on', async () => {
   const event = {
     type: 'settled',
     job: { id: 'pwsh-1', kind: 'pwsh', label: 'mesure', owner: 'session-t6-owner', status: 'completed' },
     cause: 'producer',
     awaited: false,
   }
-  const { delivered, journal } = await settle(event, { 'session-t6-owner': 'idle' })
+  const { delivered, journal } = await settle(event, { 'session-t6-owner': 'running' })
 
   const fallback = journal.find((record) => record.step === 'owner-fallback')
   assert.ok(fallback !== undefined, 'the fallback must have run for this fixture')
   assert.equal(fallback.liveOwner, 't6-owner', 'and it elected the owner itself, as measured')
-  assert.equal(delivered.length, 1, 'the owner is alive and idle: the notice is delivered')
+  assert.deepEqual(delivered, [], 'the owner is alive: it receives its own settlement, the relay must abstain')
+  const gate = journal.find((record) => record.step === 'bail' && record.why === 'owner-already-notified')
+  assert.ok(gate !== undefined, 'the abstention must be journalled')
+  assert.equal(gate.ownerState, 'running', 'the fixture is aligned on the real journal record, not on an idle state it never had')
+  assert.equal(journal.some((record) => record.step === 'relayed'), false)
+})
+
+// T-V7 — noticeText is a TOTAL table over cause × state × identity, and this case walks
+// all EIGHT corners. The point is the invariant, not the wording: a non-producer
+// settlement may never call itself a duplicate, nor claim the owner receives this notice
+// itself; the state sentence may not contradict the identity sentence.
+test('T-V7 noticeText: the eight corners of cause × state × identity keep the invariants', () => {
+  const entry = { id: 'session-abcd1234', label: 'mesure' }
+  const job = { id: 'pwsh-77', kind: 'pwsh', label: 'mesure', status: 'completed', detail: 'exit code: 0' }
+  const corners = []
+  for (const cause of ['producer', 'kill']) {
+    for (const state of ['running', 'idle']) {
+      for (const recipient of [true, false]) {
+        corners.push({ cause, state, recipient, text: relay.noticeText(job, entry, cause, state, false, recipient) })
+      }
+    }
+  }
+  assert.equal(corners.length, 8, 'cause x state x identity = eight corners')
+  for (const corner of corners) {
+    const at = corner.cause + '/' + corner.state + '/' + (corner.recipient ? 'owner' : 'other')
+    assert.match(corner.text, /^\[boost-relay\] Background job pwsh-77 \(pwsh: mesure\) launched inside subagent abcd1234/, at + ': the header stands')
+    assert.doesNotMatch(corner.text, /it\., which|\. ,/, at + ': no punctuation juxtaposition')
+    if (corner.cause !== 'producer') {
+      assert.doesNotMatch(corner.text, /treat this one as a duplicate/, at + ': a non-producer notice may never call itself a duplicate')
+      assert.doesNotMatch(corner.text, /receives this notice itself/, at + ': and may not claim the owner gets its own notice')
+      assert.match(corner.text, /not a duplicate of anything you received/, at + ': it must say so positively')
+    }
+  }
+  const cornerText = (cause, state, recipient) => corners.find((x) => x.cause === cause && x.state === state && x.recipient === recipient).text
+  const killRunningOther = cornerText('kill', 'running', false)
+  assert.match(killRunningOther, /still RUNNING/)
+  assert.doesNotMatch(killRunningOther, /predates/, 'a still-running owner has no report older than its own output')
+  const killRunningOwner = cornerText('kill', 'running', true)
+  assert.doesNotMatch(killRunningOwner, /duplicate unless/, 'the owner of a killed job is not told it already has the notice')
+})
+
+// T-V8 — the two kill + owner running corners the independent verification reached, driven
+// through the DELIVERY path. A kill is not gated: its reason to exist is that the registry
+// may never deliver it, so both identities must be reachable and coherent.
+test('T-V8 a kill with a RUNNING owner reaches either recipient without any duplicate claim', async () => {
+  // (1) recipient = owner: the fallback elects the running owner itself (t6 chain, the
+  // durable root dead).
+  const owned = await settle(
+    { type: 'settled', job: { id: 'pwsh-k1', kind: 'pwsh', label: 'mesure', owner: 'session-t6-owner', status: 'completed', detail: 'exit code: 0' }, cause: 'kill', awaited: false },
+    { 'session-t6-owner': 'running' },
+  )
+  assert.equal(owned.delivered.length, 1, 'a kill must be delivered even to a running owner')
+  assert.equal(owned.delivered[0].to, 'session-t6-owner')
+  const ownerText = textOf(owned.delivered[0].message)
+  assert.match(ownerText, /still RUNNING/)
+  assert.match(ownerText, /The settlement was a `kill`/)
+  assert.doesNotMatch(ownerText, /treat this one as a duplicate/, 'the refuted sentence must be gone')
+  assert.doesNotMatch(ownerText, /receives this notice itself/, 'the owner does not receive a kill natively')
+
+  // (2) recipient is NOT the owner: the owner runs mid-chain, the fallback elects the live
+  // ancestor — the exact shape the independent verification measured.
+  const relayed = await settle(
+    { type: 'settled', job: { id: 'pwsh-k2', kind: 'pwsh', label: 'mesure', owner: '949882e3', status: 'completed', detail: 'exit code: 0' }, cause: 'kill', awaited: false },
+    { 'session-7fa9e670': 'running', '949882e3': 'running' },
+  )
+  assert.equal(relayed.delivered.length, 1)
+  assert.equal(relayed.delivered[0].to, 'session-7fa9e670', 'the ancestor, not the owner')
+  const otherText = textOf(relayed.delivered[0].message)
+  assert.match(otherText, /you are not that session/)
+  assert.match(otherText, /still RUNNING/)
+  assert.doesNotMatch(otherText, /predates/, 'the refuted "report predates its own output" must be gone')
+  assert.doesNotMatch(otherText, /carry it\., which/, 'the punctuation juxtaposition must be gone')
+  assert.equal(relayed.journal.find((r) => r.step === 'relayed').recipientIsOwner, false)
+})
+
+// T-V9 — a settlement with NO cause. Not observed in the 75 real settles (the limitation is
+// written in the README, not hidden): the gate reasons about producer only, so such a
+// settlement is delivered and its text never claims a duplicate either.
+test('T-V9 an unlabelled settlement is delivered and never called a duplicate', async () => {
+  const event = {
+    type: 'settled',
+    job: { id: 'pwsh-v9', kind: 'pwsh', label: 'mesure', owner: 'session-t6-owner', status: 'completed' },
+    awaited: false,
+  }
+  const { delivered } = await settle(event, { 'session-t6-owner': 'running' })
+  assert.equal(delivered.length, 1, 'only producer abstains: an unlabelled cause is delivered')
   assert.equal(delivered[0].to, 'session-t6-owner')
   const text = textOf(delivered[0].message)
-  assert.match(text, /That job belongs to the subagent, which is no longer running/)
-  assert.doesNotMatch(text, /you are not that session/, 'the recipient IS the owner: the normal text stands')
-  assert.equal(journal.find((record) => record.step === 'relayed').recipientIsOwner, true)
+  assert.doesNotMatch(text, /treat this one as a duplicate/)
+  assert.match(text, /not a duplicate of anything you received/)
+  assert.doesNotMatch(text, /still RUNNING[\s\S]*predates/, 'no contradictory state pair')
 })
+
