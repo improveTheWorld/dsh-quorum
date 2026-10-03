@@ -1,7 +1,21 @@
-# Boost — mode de raisonnement profond multi-agents pour DeepSeek Harness
+# Quorum — famille de presets de raisonnement profond multi-agents pour DeepSeek Harness
 
-`@local/dsh-boost-mode` est un **bundle de preset déclaratif** (DSH ≥ 0.1.6). Il ajoute un 5ᵉ mode
-sélectionnable à côté de `standard`, `ptc`, `minimal` et `cordis` (creator).
+`@local/dsh-boost-mode` est un **bundle de preset déclaratif** (DSH ≥ 0.1.6). Il ajoute **trois
+presets** sélectionnables à côté de `standard`, `ptc`, `minimal` et `cordis` (creator), chacun bâti
+sur une des trois bases livrées :
+
+| Preset | Base | Ce que la base apporte |
+|---|---|---|
+| `quorum-ptc` | `ptc.patch.yml` | La présentation PTC (`run_code` + SDK généré) pour l'orchestrateur et ses enfants |
+| `quorum-standard` | `standard.patch.yml` | La présentation native, les lignes `workflow` actives, `codex` / `claude-code` |
+| `quorum-shell` | `minimal.patch.yml` | Un shell persistant nu — **pas** minimal en outils ni en taille de contexte |
+
+La queue quorum (persona orchestrateur, `agent-instructions`, pile d'outils, trois rôles) est
+**identique dans les trois**, à une exception près : les **quatre personas** — l'orchestrateur et les
+trois rôles — ont chacune une **tête par mode** (PTC ou natif) et un **corps commun**.
+`test/aggregate.test.mjs` borne l'invariant — T-Q2 pour le reste de la queue, T-P1 pour la tête de
+l'orchestrateur, T-P2 pour son corps, T-P4/T-P5/T-P6 pour la tête, le corps et le marqueur des trois
+rôles.
 
 ## Ce que fait le mode
 
@@ -9,8 +23,9 @@ Un pipeline de raisonnement en trois phases, calqué sur le `/boost` de Google A
 
 1. **Stratégie** — l'orchestrateur inspecte le workspace, décompose en sous-tâches vérifiables et
    écrit *avant* de déléguer le critère d'acceptation qu'il exécutera lui-même.
-2. **Exécution parallèle** — fan-out depuis un seul tour `run_code` vers des rôles isolés, puis
-   travail utile de l'orchestrateur pendant que les enfants tournent.
+2. **Exécution parallèle** — fan-out depuis un seul tour vers des rôles isolés (un programme
+   `run_code` en PTC, des appels d'outils directs en natif), puis travail utile de l'orchestrateur
+   pendant que les enfants tournent.
 3. **Vérification et livraison** — un vérificateur adversarial indépendant, appelé **en premier
    plan**, doit produire un verdict étayé par de la sortie brute avant que l'orchestrateur puisse
    conclure. En cas d'échec, les diagnostics repartent dans l'itération suivante (bornée à 2 tours).
@@ -29,15 +44,22 @@ mécanisme de spécialisation : `persona`, `toolFilter` et `maxDepth` sont figé
 
 ## PTC pour l'orchestrateur **et** ses sous-agents
 
-Le preset déclare `@deepseek-ai/dsh-agent-tool-presentation` avec `mode: ptc`. Deux propriétés de DSH
-rendent l'héritage gratuit :
+Seul `quorum-ptc` déclare `@deepseek-ai/dsh-agent-tool-presentation` avec `mode: ptc` : c'est le
+discriminant mesuré entre lui et `quorum-standard`, qui n'en porte aucune ligne. Deux propriétés de
+DSH rendent l'héritage gratuit :
 
 - la présentation est fixée **pour toute la portée du preset** ;
 - `dsh-subagent` joint chaque enfant à la **révision exacte du preset de son parent**
   (`composeFrom`) — il n'existe aucun moyen de nommer un preset pour un enfant.
 
-Conséquence : l'orchestrateur et tous ses sous-agents voient `run_code` + le SDK TypeScript généré, et
-aucun schéma d'outil natif. Ajouter un rôle coûte donc très peu de catalogue.
+Conséquence, pour `quorum-ptc` : l'orchestrateur et tous ses sous-agents voient `run_code` + le SDK
+TypeScript généré, et aucun schéma d'outil natif. Ajouter un rôle coûte donc très peu de catalogue.
+`quorum-standard` et `quorum-shell`, sans ligne de présentation, gardent les schémas d'outils natifs
+de leur base. La queue quorum y est la même à une exception près : les **quatre personas** (celle de
+l'orchestrateur et celles des trois rôles) portent une **tête par mode** — les paragraphes PTC et leurs
+notes n'existent que dans `quorum-ptc`, les deux presets natifs reçoivent l'équivalent natif (appels
+directs, schémas dans l'API et non dans le prompt, arguments JSON seuls), puis un corps commun
+identique. Décrire une interface absente serait un preset cassé, pas une opinion.
 
 ## Installation
 
@@ -45,16 +67,17 @@ aucun schéma d'outil natif. Ajouter un rôle coûte donc très peu de catalogue
 plugin_manager { action: "install_bundle", target: "C:\\CodeSource\\dsh-boost-mode" }
 ```
 
-Puis, dans le Web GUI : **Settings → Agent Presets**, choisir **Boost** pour la prochaine session
-(le sélecteur lit `agentPresets.list`, aucun code client n'est nécessaire).
+Puis, dans le Web GUI : **Settings → Agent Presets**, choisir **Quorum (PTC)**, **Quorum (Standard)** ou
+**Quorum (Shell)** pour la prochaine session (le sélecteur lit `agentPresets.list`, aucun code
+client n'est nécessaire).
 
 ## Réglages recommandés
 
-- **Concurrence** : `ctx.subagents.maxActiveSubagents` vaut 8 par défaut. Pour du fan-out type boost,
+- **Concurrence** : `ctx.subagents.maxActiveSubagents` vaut 8 par défaut. Pour du fan-out type quorum,
   monter à 12–16 via le réglage host `subagent.maxActiveSubagents`. Ce n'est pas un réglage du preset.
-- **Profondeur** : `maxDepth` est volontairement omis sur toutes les lignes de délégation ; il retombe
-  donc sur le réglage host `subagent.maxDepth` (1 par défaut), ce qui interdit déjà à un worker de
-  déléguer à son tour. Nommer le champ exigerait que le provider déclare la capacité `depthLimit`.
+- **Profondeur** : `maxDepth: 1` est déclaré sur chaque ligne de la queue (les trois rôles et le
+  fan-out générique), et le réglage host `subagent.maxDepth` vaut la même valeur par défaut : un worker
+  ne peut donc pas déléguer à son tour, par deux réglages indépendants.
 - **Effort de raisonnement** : les rôles héritent de la route de la session (v1). Pour un modèle
   dédié par rôle, ajouter des `agentOptions {provider, model, reasoningEffort}` sur les lignes
   `tool-subagent-investigate` / `-implement` / `-verify`. Attention : un id de modèle inconnu fait
@@ -72,8 +95,10 @@ Puis, dans le Web GUI : **Settings → Agent Presets**, choisir **Boost** pour l
 - **Pas d'isolation par worktree** : contrairement à Antigravity, DSH n'offre pas de worktrees
   éphémères par sous-agent. Donner à chaque `subagent_implement` un jeu de fichiers disjoint est donc
   une discipline de protocole, pas une garantie du runtime.
-- **`workflow` et `ralph` désactivés** en v1 : en PTC, le fan-out s'écrit directement dans `run_code`.
-  À réévaluer par A/B (jalon M5 de `PLAN.md`).
+- **`workflow` et `ralph`** : désactivés dans `quorum-ptc` (en PTC, le fan-out s'écrit directement
+  dans `run_code`) ; `quorum-standard` garde l'état de sa base, où `workflow-ptc` et `tool-workflow`
+  sont actifs — c'est la base qui décide, la queue ne les touche pas. À réévaluer par A/B (jalon M5 de
+  `PLAN.md`).
 - **Présentation unique** : une seule ligne `tool-presentation` par composition ; en ajouter une
   seconde est refusé, pas fusionné. Si votre déploiement ne compose pas de runtime PTC, ce preset
   refuse de monter en nommant la ligne fautive.
@@ -136,10 +161,11 @@ node tools/diagnose-frames.mjs <fichier.zstd>  # framing : nombre de frames, tai
 
 ## Fichiers
 
-- `cordis.patch.yml` — la déclaration `preset-boost` (composition complète).
+- `cordis.patch.yml` — les trois déclarations `preset-quorum-*` (compositions complètes ; la queue
+  quorum y est recopiée à l'identique, T-Q2 la borne).
 - `lib/index.js` — volontairement vide ; ce bundle ne publie aucune API runtime.
 - `README.md` — cette page.
 
 Les scripts d'analyse (`tools/`), la conception (`docs/PLAN.md`), le protocole
 (`docs/PROTOCOL.md`) et la passation (`docs/HANDOVER.md`) vivent à la **racine du dépôt**
-`dsh-boost/`, aux côtés des quatre autres paquets du mode Boost.
+`dsh-boost/`, aux côtés des quatre autres paquets du mode Quorum.

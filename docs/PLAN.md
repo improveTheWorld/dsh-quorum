@@ -1,7 +1,7 @@
-# Plan — Mode `boost` pour DeepSeek Harness
+# Plan — Mode `quorum` pour DeepSeek Harness
 
 > **Document historique — l'état fait foi dans `docs/HANDOVER.md`.** Ce plan décrit la conception
-> d'origine du mode Boost et ses jalons M0–M5. Il contient une copie du `cordis.patch.yml` (§7) qui a
+> d'origine du mode Quorum et ses jalons M0–M5. Il contient une copie du `cordis.patch.yml` (§7) qui a
 > **divergé** des patches réellement montés, et des affirmations que les mesures suivantes ont périmées :
 > elles sont marquées **périmé** sur place, avec la valeur actuelle. Ne rien en déduire sur l'état courant —
 > installer, composer et tester se lisent dans `README.md` (racine) et `docs/HANDOVER.md`.
@@ -12,7 +12,7 @@ qui héritent eux aussi de **PTC**.
 
 - Statut : **M0 et M1 réalisés** (voir §0) ; M2–M5 à faire
 - Version DSH cible : `0.1.7-rc.2` — **périmé** : le disque et le process vivant portent **`0.2.0-rc.2`** (`dsh --version`, mesuré le 2026-09-30 ; process `dsh web` pid 4248, démarré le 30/09 à 20:17:31). Profil `web`
-- Livrable attendu : bundle installable `C:\CodeSource\dsh-boost-mode\` déclarant le preset `boost`
+- Livrable attendu : bundle installable `C:\CodeSource\dsh-boost-mode\` déclarant le preset `quorum`
 
 ---
 
@@ -30,7 +30,7 @@ qui héritent eux aussi de **PTC**.
 | M1 — activation | `list_plugins` → `include:preset-boost` `enabled: true`, `fiberPhase: active`. Un échec de montage serait resté sur le roster avec son diagnostic. |
 | M1 — composition | `dsh --profile web --dump-config` : les 34 lignes du preset sont composées, `tool-presentation` → `mode: ptc`, les 3 rôles présents avec leurs `deny`, `workflow-ptc` / `tool-workflow` / `tool-ralph` / `tool-plugin-manager` désactivés. |
 
-### Blocage rencontré et corrigé (hors périmètre boost)
+### Blocage rencontré et corrigé (hors périmètre quorum)
 
 La première installation a échoué : `No active Node.js version is configured.
 Run 'nvm install <version>' then 'nvm use <version>'.`
@@ -95,7 +95,7 @@ l'arbre complet avec durées et tokens.
 
 ### M1-ter — Premier run réel : un bug du preset, trouvé par l'outillage
 
-Run utilisateur en mode Boost (workspace `Scalpel-mcp`), session arrêtée après ~2 min 30, 13 programmes
+Run utilisateur en mode Quorum (workspace `Scalpel-mcp`), session arrêtée après ~2 min 30, 13 programmes
 `run_code`, 0 sous-agent.
 
 **Ce qui marchait** : marqueurs `boost orchestrator` + `Programmatic Tool Calling` dans le prompt
@@ -130,7 +130,7 @@ Correctifs appliqués :
 — le worker PTC ne peut pas poser son ACL d'écriture Windows. La session est passée de
 `workspace-write` à `danger-full-access` en cours de run et cette classe d'échec a disparu
 (bilan : 9 `run_code` réussis, 6 échoués). Cela affecte le preset `ptc` livré à l'identique.
-Contournement : garder les sessions Boost en `danger-full-access` jusqu'à correction amont.
+Contournement : garder les sessions Quorum en `danger-full-access` jusqu'à correction amont.
 
 **Fait établi au passage : un host en cours ne relit pas un patch de bundle SEUL.** Test par ligne sonde
 (`preset-boost-probe` ajouté puis retiré) : la déclaration n'est jamais apparue dans l'arbre vivant
@@ -142,7 +142,7 @@ redémarrage de DSH » — est **fausse pour un patch de profil**, et la mesure 
 `<profil>/cordis.patch.yml` et `$DSH_HOME/cordis.patch.yml` — et compare leur **contenu** (`:360-368`).
 Dès que l'un des trois change, il relit **toutes** les couches depuis le disque
 (`readProfilePatches` puis `reconcileProfilePatches`, `:369-370`), **patchs de bundle compris, sans
-redémarrage**. C'est ainsi que le seuil de compaction du preset `boost` a été appliqué à chaud le
+redémarrage**. C'est ainsi que le seuil de compaction du preset `quorum` a été appliqué à chaud le
 2026-09-30 (la mesure est écrite dans `profiles\web\cordis.patch.yml:85-104`), et c'est aussi ce qui
 impose de faire une bascule de profil en **une seule passe** (`docs/HANDOVER.md` §11). Ce qui reste vrai :
 un patch de bundle modifié **sans toucher** à l'un des trois chemins surveillés n'est jamais relu, et
@@ -150,9 +150,9 @@ ajouter une **ligne** à un patch de preset n'est pas relu à chaud non plus.
 
 ### M1-quater — Run de production : le mode marche, la vérification a dérivé
 
-Run utilisateur en Boost (session `session-d06c6d28`, workspace `Scalpel-mcp`), observé en direct.
+Run utilisateur en Quorum (session `session-d06c6d28`, workspace `Scalpel-mcp`), observé en direct.
 
-**Validé** : `preset-boost` actif ; surface = `run_code` seul (PTC) ; **3 workers lancés depuis un seul
+**Validé** : le preset `quorum` actif ; surface = `run_code` seul (PTC) ; **3 workers lancés depuis un seul
 programme** (`t1/s10` « Launch three parallel workers » : `subagent_investigate×2` +
 `subagent_implement×1`) ; les 3 enfants héritent `preset=boost` **et tournent en PTC** (`run_code`) ;
 0 erreur d'outil sur la racine ; 20 programmes PTC, ~1,2 M tokens sur la racine. Le correctif
@@ -164,7 +164,7 @@ reste KO sur tout le run : `subagent_verify` n'apparaît ni comme appel d'outil,
 20 programmes. L'orchestrateur a fait le calcul statistique lui-même (`t1/s12` « Independent
 statistical cross-check of the claim », `t1/s13`, `t1/s14`, `t1/s16`) et l'a présenté comme un
 « calcul croisé » indépendant — la session affiche : « Le calcul croisé révèle un point que la doc
-ignore… ». C'est exactement le mode d'échec que boost doit supprimer : une conclusion produite **et**
+ignore… ». C'est exactement le mode d'échec que quorum doit supprimer : une conclusion produite **et**
 validée par le même agent.
 
 Cause : **une faille de rédaction du preset**. La phase 3 disait à la fois « appelle toujours
@@ -305,7 +305,7 @@ persona ne fait que contourner le déficit ; la vraie correction existe.
   **vérificateur** : le père ne peut pas les lister, ni être notifié.
 - **Pourquoi c'est réparable** : `JobRegistry.subscribe(filter, listener)` accepte
   `{ owners: 'scope' }`, qui « delivers the owners **composed under the subscribing context** »
-  (`types.d.ts:214-216`). Un plugin monté dans la portée du **preset boost** entend donc les settlements
+  (`types.d.ts:214-216`). Un plugin monté dans la portée du **preset quorum** entend donc les settlements
   du père **et de tous ses enfants**. Il ne reste qu'à réinjecter l'avis dans la session racine
   (`agent.inject(...)`, le chemin qu'utilise déjà `dsh-tool-jobs` pour un propriétaire occupé,
   `dsh-tool-jobs/lib/index.js:295`).
@@ -349,10 +349,10 @@ chaud, et rien dans le preset ne peut rendre visible un job appartenant à un au
 **Ce qui reste non exercé** : aucun relais réel ne s'est encore déclenché, faute d'un run où un worker
 laisse un job derrière lui. Les compteurs de `/boost-relay` le diront. C'est la seule étape non prouvée.
 
-### Reste à vérifier (nécessite une session Boost)
+### Reste à vérifier (nécessite une session Quorum)
 
 Un preset se lie à la création de la session ; ces points ne peuvent pas être observés depuis la
-session courante (mode creator). À contrôler dans une nouvelle session en mode **Boost** :
+session courante (mode creator). À contrôler dans une nouvelle session en mode **Quorum** :
 
 1. la surface d'outils ne montre que `run_code` (+ SDK généré) ⇒ PTC effectif ;
 2. le SDK généré expose `subagent_investigate`, `subagent_implement`, `subagent_verify`,
@@ -369,19 +369,19 @@ Puis, pour l'analyse : `node tools/boost-report.mjs --session <id>` et me transm
 
 ## 1. Objectif et critères de succès
 
-**Objectif.** Ajouter un 5ᵉ preset d'agent `boost` qui transforme une session en pipeline de
+**Objectif.** Ajouter un 5ᵉ preset d'agent `quorum` qui transforme une session en pipeline de
 raisonnement multi-agents : l'orchestrateur (agent principal) décompose, délègue à des rôles isolés,
 puis fait vérifier le résultat par un agent indépendant avant de conclure.
 
 **Critères de succès (vérifiables)**
 
-1. `boost` apparaît dans le sélecteur « Agent preset » du Web GUI sans écrire une ligne de code client.
-2. Une session `boost` ne voit que `run_code` comme outil appelable directement (présentation PTC) et
+1. `quorum` apparaît dans le sélecteur « Agent preset » du Web GUI sans écrire une ligne de code client.
+2. Une session `quorum` ne voit que `run_code` comme outil appelable directement (présentation PTC) et
    retrouve les rôles de délégation dans le SDK généré.
-3. Un sous-agent lancé depuis une session `boost` tourne **aussi** en PTC (héritage de composition).
+3. Un sous-agent lancé depuis une session `quorum` tourne **aussi** en PTC (héritage de composition).
 4. Un rôle `verify` ne peut ni écrire de fichier, ni déléguer, et doit citer la sortie brute des
    commandes qu'il exécute.
-5. Sur une tâche piégée (bug seedé + suite de tests), la session `boost` produit une réponse finale
+5. Sur une tâche piégée (bug seedé + suite de tests), la session `quorum` produit une réponse finale
    qui cite la sortie d'un test réellement exécuté, sans affirmation non vérifiée.
 6. Aucune régression sur les 4 presets existants (leur roster reste actif).
 
@@ -453,7 +453,7 @@ Teamwork) ; la vérification reste pilotée par des instructions d'agent, pas pa
 
 - Presets embarqués : **`standard`, `ptc`, `minimal`, `cordis`** uniquement — vérifié sur `master`
   ([API GitHub](https://api.github.com/repos/deepseek-ai/deepseek-harness/contents/packages/bundle/web-app/presets)).
-  Aucun preset `boost` upstream.
+  Aucun preset `quorum` upstream.
 - Ce que vous appelez « mode creator » **est le preset `cordis`** : c'est lui qui monte
   `skill-filesystem` sur les skills `cordis-plugin-development` / `editing-cordis-compositions` /
   `cordis-composition-reference` (cf. README `@deepseek-ai/dsh-agent-preset`, « the `skills/`
@@ -461,12 +461,12 @@ Teamwork) ; la vérification reste pilotée par des instructions d'agent, pas pa
 - Un équivalent **Teamwork** est livré mais désactivé : `@deepseek-ai/dsh-experimental-agent-team-profile`
   (roster durable, mailbox pair-à-pair, DAG de tâches partagé, 9 outils `team_*`). Il **ne contient
   aucun outil de revue/vérification** (« review » n'existe qu'en prose dans la politique du Lead) et
-  il désactive les outils `subagent` standard. → mauvaise base pour `boost`, bonne base pour un futur
+  il désactive les outils `subagent` standard. → mauvaise base pour `quorum`, bonne base pour un futur
   mode long-horizon.
 
 ### 3.2 Implémentations communautaires proches
 
-| Projet | Ce qu'il fait | Pertinence pour `boost` |
+| Projet | Ce qu'il fait | Pertinence pour `quorum` |
 |---|---|---|
 | [y08lin4/dsh-multiagent-modes](https://github.com/y08lin4/dsh-multiagent-modes) | Presets « 协作模式-均衡 / 高效 » : le principal ne fait que décomposer/dispatcher/accepter, tout le travail part en sous-agents, deux paliers de concurrence (≤10 / ≤20). Plugin local avec interception `agent/request` pour injecter l'effort, + un SKILL de protocole. | **Très proche** : même thèse (préserver la chaîne de raisonnement du principal). Licence CC BY-SA 4.0. |
 | [ninipa/oh-my-dsh-slim](https://github.com/ninipa/oh-my-dsh-slim) | Orchestrateur + 5 rôles spécialisés (oracle/designer/fixer/explorer/librarian), chacun avec persona, modèle, effort, `toolFilter` et MCP propres ; délégation background-first ; plugin `early-close-context` contre le « j'ai fini » prématuré. | **La meilleure source de mécanique** : c'est exactement le modèle « un rôle = un outil dédié ». |
@@ -499,13 +499,13 @@ un répertoire dans `~/.dsh/.agent-presets/` — **que DSH 0.1.7 ne lit plus**
 
 **Conclusion** — *périmée : le disque et le process vivant portent `0.2.0-rc.2` depuis le 2026-09-30, et le livrable est le dépôt consolidé `C:\CodeSource\dsh-boost` (voir `docs/HANDOVER.md`) ; la conclusion ci-dessous est celle du moment de ce plan, où l'installation portait `0.1.7-rc.2`.* Vous êtes sur `0.1.7-rc.2`. Aucune de ces implémentations ne fonctionnera telle quelle.
 Il faut soit migrer l'une d'elles vers le modèle déclaratif, soit — ce que propose ce plan — écrire
-le preset `boost` nativement en déclaratif, en réutilisant leurs idées de conception (rôles par
+le preset `quorum` nativement en déclaratif, en réutilisant leurs idées de conception (rôles par
 `toolFilter`, budget, validation de brief, ledger « enfant non réglé »).
 
 **Le trou dans l'écosystème** : personne ne publie un preset déclaratif qui combine
 (i) présentation PTC ⇒ sous-agents en Code Mode, (ii) rôles spécialisés par instance d'outil, et
 (iii) **vérification adversariale comme étape obligatoire en premier plan**. C'est exactement la
-cible de `boost`.
+cible de `quorum`.
 
 ---
 
@@ -537,12 +537,12 @@ Tous vérifiés dans l'installation `0.1.7-rc.2` — **périmé : c'est `0.2.0-r
 
 ## 5. Décisions d'architecture
 
-**D1 — `boost` est un preset (mode), pas une commande slash.**
+**D1 — `quorum` est un preset (mode), pas une commande slash.**
 Chez Antigravity, `/boost` peut changer d'architecture en cours de session. Dans DSH, la composition
 d'une session est figée à sa création (stabilité du préfixe de requête / KV-cache) et **les enfants
 héritent de cette composition** (F3). Un `/boost` tapé dans une session `standard` ne pourrait donc
 ni activer PTC ni donner les rôles aux enfants. Le mode est le bon analogue. Une commande `/boost`
-reste possible **à l'intérieur** du preset `boost` (escalade d'intensité, §8) et, en option, comme
+reste possible **à l'intérieur** du preset `quorum` (escalade d'intensité, §8) et, en option, comme
 raccourci global qui n'accepte que les sessions vierges via `agentPresets.select` (F15).
 
 **D2 — La base est la présentation PTC.** C'est ce qui répond à « que les sous-agents utilisent aussi
@@ -580,13 +580,13 @@ de portée preset, donc visible aussi par les enfants.
 
 **D9 — Plan mode conservé mais désarmé par défaut.** Les 4 presets livrés montent `dsh-plan-mode` ;
 on garde la ligne pour la parité et parce que `exit_plan_mode` reste un outil utilisable, mais le
-protocole boost dit explicitement « boost exécute immédiatement, n'entre pas en plan mode sans
+protocole quorum dit explicitement « quorum exécute immédiatement, n'entre pas en plan mode sans
 demande » — c'est le différenciateur d'Antigravity face à Teamwork.
 
 **D10 — Agent Teams hors périmètre.** `dsh-experimental-agent-team-profile` est un bundle **host**
 (global) qui désactive les outils `subagent` standard, impose un checkout partagé et n'offre aucune
-vérification. Il ne doit pas être mélangé au preset `boost`. Il constituera la base d'un futur mode
-`teamwork` (campagnes longues), pas de `boost`.
+vérification. Il ne doit pas être mélangé au preset `quorum`. Il constituera la base d'un futur mode
+`teamwork` (campagnes longues), pas de `quorum`.
 
 ---
 
@@ -596,7 +596,7 @@ vérification. Il ne doit pas être mélangé au preset `boost`. Il constituera 
 C:\CodeSource\dsh-boost-mode\
 ├── PLAN.md                      # ce document
 ├── package.json                 # manifeste bundle : dsh.bundle.patch -> ./cordis.patch.yml
-├── cordis.patch.yml             # insère le preset boost (et, en M2, le plugin dsh-boost)
+├── cordis.patch.yml             # insère le preset quorum (et, en M2, le plugin dsh-boost)
 ├── README.md                    # doc utilisateur : ce que fait le mode, comment l'installer/le tuner
 ├── index.js                     # (M2) plugin host : section de prompt, commande /boost, garde-fous
 └── skills/
@@ -624,7 +624,7 @@ plugin_manager { action: "install_bundle", target: "C:\\CodeSource\\dsh-boost-mo
 
 ---
 
-## 7. Composition du preset `boost`
+## 7. Composition du preset `quorum`
 
 > **Copie historique, et elle a divergé.** Le bloc qui suit recopie le `cordis.patch.yml` du bundle tel
 > qu'il était au moment du plan. Le patch réel est `packages/boost-mode/cordis.patch.yml`, agrégé par le
@@ -828,13 +828,13 @@ plugin_manager { action: "install_bundle", target: "C:\\CodeSource\\dsh-boost-mo
 
 - **`toolFilter` : un nom d'outil inconnu fait échouer le montage.** Les listes `deny`/`allow`
   doivent être construites à partir des noms réellement déclarés par les lignes montées, vérifiés par
-  `cordis_inspect_query { provider: "Tool", method: "listTools" }` dans une session boost (jalon M0).
+  `cordis_inspect_query { provider: "Tool", method: "listTools" }` dans une session quorum (jalon M0).
   Ne jamais deviner un nom.
 - **`maxDepth: 1`** est explicite pour la lisibilité ; la valeur par défaut de l'hôte est déjà 1 (F14).
 - **`isolate.workflowEngine: true`** sur le groupe `delegation` : conservé du preset livré. Si
   `workflow-ptc` reste désactivé et que plus rien ne consomme `ctx.workflowEngine` dans le preset,
   cette isolation peut être retirée — à trancher en M1 en vérifiant que le montage reste `active`.
-- **`order: 5`** place Boost après creator dans le roster.
+- **`order: 5`** place Quorum après creator dans le roster.
 
 ---
 
@@ -921,7 +921,7 @@ toolFilter:
 
 ### 8.5 Paramètres à monter (F14)
 
-`ctx.subagents` : `maxActiveSubagents` défaut **8**. Pour du fan-out type boost, monter à **12–16**
+`ctx.subagents` : `maxActiveSubagents` défaut **8**. Pour du fan-out type quorum, monter à **12–16**
 via le réglage host `subagent.maxActiveSubagents`. À documenter dans le README du bundle — ce n'est
 pas un réglage du preset.
 
@@ -940,7 +940,7 @@ pas un réglage du preset.
 
 **Sortie** : tableau `outil → nom exact` figé, plus la confirmation du runtime PTC.
 
-### M1 — Preset `boost` minimal viable (le cœur)
+### M1 — Preset `quorum` minimal viable (le cœur)
 
 Livrer `package.json` + `cordis.patch.yml` (+ `README.md`), sans `index.js`, avec :
 persona porteuse du protocole §8.1, les 5 lignes de délégation avec personas/filtres §8.2–8.4,
@@ -949,11 +949,11 @@ persona porteuse du protocole §8.1, les 5 lignes de délégation avec personas/
 **Acceptation**
 1. `plugin_manager install_bundle` renvoie `application: applied` sans warning bloquant.
 2. `cordis_inspect_query Config.listConfigs { name: '@deepseek-ai/dsh-agent-preset' }` renvoie **5** entrées, dont `preset-boost` avec `status: schema`.
-3. Nouvelle session, sélecteur « Agent preset » : **Boost** présent (F2).
-4. Dans la session boost, `Tool.listTools` ne montre que `run_code` (+ les outils du SDK annoncés) : PTC effectif.
+3. Nouvelle session, sélecteur « Agent preset » : **Quorum** présent (F2).
+4. Dans la session quorum, `Tool.listTools` ne montre que `run_code` (+ les outils du SDK annoncés) : PTC effectif.
 5. Le SDK généré expose bien `subagent_investigate`, `subagent_implement`, `subagent_verify`,
    `send_message`, `interrupt_agent`, `list_agents` — **point le moins certain du plan**, à vérifier ici.
-6. Un `subagent_verify` lancé depuis la session boost démarre : le transcript de l'enfant montre des
+6. Un `subagent_verify` lancé depuis la session quorum démarre : le transcript de l'enfant montre des
    appels `run_code` ⇒ héritage PTC confirmé (F3+F6).
 7. Les presets `standard`/`ptc`/`minimal`/`cordis` restent `active`.
 
@@ -980,7 +980,7 @@ Ajouter au plugin un `ctx.commands.register` **scopé à l'agent** (F15) :
   réussit que sur une session vierge, sinon renvoie un message expliquant qu'il faut choisir le mode
   dans le sélecteur (la composition d'une session entamée est figée).
 
-**Acceptation** : `/boost` tapé dans une session boost exécute la tâche et l'état est journalisé ;
+**Acceptation** : `/boost` tapé dans une session quorum exécute la tâche et l'état est journalisé ;
 en session `standard`, la commande globale explique la contrainte au lieu de mentir.
 
 ### M4 — Garde-fous mécaniques (optionnel, recommandé)
@@ -999,7 +999,7 @@ Porter les deux meilleures idées communautaires dans le plugin :
 ### M5 — Recette et A/B
 
 1. Bug seedé + suite de tests dans un projet jetable ; exécuter la même tâche en `standard` puis en
-   `boost`, 3 fois chacun.
+   `quorum`, 3 fois chacun.
 2. Mesurer : taux de verdict correct, présence de sortie de test brute dans la réponse finale,
    tokens consommés, durée.
 3. Trancher D6 (workflow activé ou non) sur ces mesures.
@@ -1019,8 +1019,8 @@ Porter les deux meilleures idées communautaires dans le plugin :
 | Un modèle non supporté dans `agentOptions` | Échec de la délégation au premier appel | v1 sans route par rôle (D5) ; validation par `list_subagent_models` en v1.1 |
 | « Early close » : conclusion avant réglage des enfants (F11) | Réponse finale non fondée | D7 (vérification en premier plan) + ledger M4 |
 | Prolifération de rôles figés par instance (F4) | Ajouter un rôle = ajouter une ligne, pas un paramètre | Assumé : 3 rôles + générique suffisent ; documenter la recette d'ajout |
-| Agent Teams activé en parallèle | Conflit de noms : `send_message`, `list_agents`, `interrupt_agent` sont enregistrés par `tool-agent-team` dans la portée propre de **chaque agent** et masquent ceux de `tool-subagent-control` que boost monte, avec des signatures incompatibles | Traiter les deux comme exclusifs dans un profil ; voir annexe A |
-| Dérive du nom `boost` vs. écosystème | Confusion avec les presets communautaires (legacy) | Nommer le bundle et le README explicitement `declarative preset, DSH ≥ 0.1.6` |
+| Agent Teams activé en parallèle | Conflit de noms : `send_message`, `list_agents`, `interrupt_agent` sont enregistrés par `tool-agent-team` dans la portée propre de **chaque agent** et masquent ceux de `tool-subagent-control` que quorum monte, avec des signatures incompatibles | Traiter les deux comme exclusifs dans un profil ; voir annexe A |
+| Dérive du nom `quorum` vs. écosystème | Confusion avec les presets communautaires (legacy) | Nommer le bundle et le README explicitement `declarative preset, DSH ≥ 0.1.6` |
 
 ---
 
@@ -1057,7 +1057,7 @@ Il monte trois lignes : `agent-team` (`ctx.agentTeams` : roster + mailbox + DAG 
 
 C'est l'analogue DSH d'Antigravity **`/teamwork-preview`**, pas de `/boost` :
 
-| Axe | Agent Teams | Preset `boost` |
+| Axe | Agent Teams | Preset `quorum` |
 |---|---|---|
 | Emplacement | bundle **host**, global à tous les presets | preset : **un mode sélectionnable** |
 | Horizon | heures → jours, adossé au log de session | secondes → heures, éphémère |
@@ -1069,17 +1069,17 @@ C'est l'analogue DSH d'Antigravity **`/teamwork-preview`**, pas de `/boost` :
 
 **Interaction problématique.** `tool-agent-team` installe ses outils dans la portée propre de chaque
 agent (`maybeInstall` à l'activation puis sur `agent/created`,
-`dsh-experimental-tool-agent-team/lib/index.js:539-545`). Trois noms coïncident avec ceux que boost
+`dsh-experimental-tool-agent-team/lib/index.js:539-545`). Trois noms coïncident avec ceux que quorum
 monte, avec des signatures différentes :
 
-| Nom | Agent Teams | boost (`tool-subagent-control`) |
+| Nom | Agent Teams | quorum (`tool-subagent-control`) |
 |---|---|---|
 | `send_message` | `target` = **nom** d'un pair | `agent_id` = id de sous-agent |
 | `list_agents` | `{}` | `scope: children \| descendants` |
 | `interrupt_agent` | `target` = nom de pair | `agent_id` |
 
-La portée la plus proche gagnant, les versions Agent Teams masqueraient celles de boost : le protocole
-de boost (« une seule relance via `send_message` ») changerait silencieusement de sémantique. Les quatre
+La portée la plus proche gagnant, les versions Agent Teams masqueraient celles de quorum : le protocole
+de quorum (« une seule relance via `send_message` ») changerait silencieusement de sémantique. Les quatre
 `disabled: true` du bundle visent par ailleurs des lignes host déjà désactivées dans ce profil, donc
 inoffensifs aujourd'hui — mais fragiles.
 
@@ -1113,7 +1113,7 @@ le 2026-09-29.
   cost for capacity expansion »).
 - Une requête dont l'inférence n'a pas démarré au bout de 10 min voit sa connexion fermée.
 
-**Conséquence pour boost : multiplier les clés d'un même compte n'apporte aucun parallélisme.** Le
+**Conséquence pour quorum : multiplier les clés d'un même compte n'apporte aucun parallélisme.** Le
 plafond est au niveau du compte, pas de la clé.
 
 Et le goulot est **entièrement local** : DSH plafonne à `maxActiveSubagents: 8` (défaut, `.volatile()`
@@ -1123,7 +1123,7 @@ il y a donc un facteur **~300** de marge inutilisée côté fournisseur. La bonn
 
 ### Un piège contre-intuitif
 
-Le réflexe « une clé ou un `user_id` par agent » **dégraderait** ce qui rend boost économique :
+Le réflexe « une clé ou un `user_id` par agent » **dégraderait** ce qui rend quorum économique :
 `user_id` isole le KVCache, donc fragmenter les agents par identité casse le partage de préfixe. Or le
 run mesuré en M1-quinquies tourne à **99,35 % de cache** sur 25,17 M tokens d'entrée. Répartir les
 agents sur des identités distinctes ferait grimper le coût réel, pour un gain de parallélisme nul
@@ -1133,7 +1133,7 @@ agents sur des identités distinctes ferait grimper le coût réel, pour un gain
 
 1. **Monter la limite locale avant tout le reste — décidé.** Cibles : **`maxActiveSubagents` 8 → 16** et
    **`maxParallelToolCalls` 10 → 24**. `maxDepth` reste à **1** : c'est le garde-fou exponentiel, et le
-   relever globalement exposerait les autres presets alors que les lignes de boost se plafonnent déjà
+   relever globalement exposerait les autres presets alors que les lignes de quorum se plafonnent déjà
    elles-mêmes.
    **Chemin obligatoire : l'interface** (Settings → Subagent, Settings → Agent Loop). Preuve :
    `dsh-settings` n'a **aucun watcher** — son seul déclencheur de relecture est
@@ -1142,7 +1142,7 @@ agents sur des identités distinctes ferait grimper le coût réel, pour un gain
    écrit via le panneau s'applique **immédiatement**, sans redémarrage.
    À mesurer après coup : largeur de fan-out réellement atteinte et taux de 429.
    *Attente honnête* : la campagne en cours lance 3 bras à la fois, donc 8 suffisait — le gain porte sur
-   les runs boost à fan-out large, pas sur cette campagne.
+   les runs quorum à fan-out large, pas sur cette campagne.
 2. **~~Routage statique par rôle sur deux modèles~~ — INVALIDÉ par la recherche du 2026-09-29.**
    L'axe supposait `deepseek-v4-pro` plus capable. C'est **faux** : DeepSeek documente l'inverse (voir
    « Modèles » ci-dessous). Router le vérificateur vers `deepseek-v4-pro` reviendrait à payer ~4,4× sur
@@ -1324,7 +1324,7 @@ ci-dessus restant disponible mais déconseillé.
   impératif est un jour utilisé ;
 - **le texte entre deux appels d'outil revient dans des blocs `thinking` vides** au réglage `display`
   par défaut. Autrement dit : **l'interface se tait entre les appels d'outil**, exactement le symptôme
-  de « silence » qu'on a passé la session à diagnostiquer. À anticiper si un jour un run boost tourne
+  de « silence » qu'on a passé la session à diagnostiquer. À anticiper si un jour un run quorum tourne
   sur Opus.
 - **Pour aller au-delà d'Opus**, la gamme Anthropic place **`claude-fable-5-1`** au-dessus ($10 / $50,
   effort par défaut `high`), « for demanding reasoning and long-horizon agentic work ». Opus 5.5 est le

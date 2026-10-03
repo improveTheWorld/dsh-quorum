@@ -8,13 +8,14 @@ leurs mesures dans `DECISIONS.md`.
 
 ## 1. En une ligne
 
-`C:\CodeSource\dsh-boost` est le depot consolide du mode Boost : **huit lignes** montees par un seul
-bundle installable. Le profil `web` pointe dessus. Etat : **256 cas a la racine, 0 echec**, arbre propre
+`C:\CodeSource\dsh-boost` est le depot consolide du mode Quorum : **dix lignes** montees par un seul
+bundle installable. Le profil `web` pointe dessus. Etat : **268 cas a la racine, 0 echec**, arbre propre
 (`git log -1` pour le HEAD — un compte ecrit ici perime a chaque commit).
 
 ```
-les huit lignes, dans l'ordre :
-  preset-boost · boost-job-relay · boost-status-command · dsh-detached-jobs ·
+les dix lignes, dans l'ordre :
+  preset-quorum-ptc · preset-quorum-standard · preset-quorum-shell ·
+  boost-job-relay · boost-status-command · dsh-detached-jobs ·
   dsh-guard-surrogate · dsh-boost-channel · dsh-boost-context-budget · dsh-boost-lessons
 ```
 
@@ -63,8 +64,8 @@ README.md:117,171   et   docs/HANDOVER.md:276   annoncent encore 32/32 pour boos
 ## 3. Ce qui est VERIFIE (mesure, pas opinion)
 
 ```
-les huit lignes montees, 0 avertissement        dsh --profile web --dump-config
-256 cas a la racine, 0 echec                     node --test  (le run racine COLLECTE les paquets)
+les dix lignes montees, 0 avertissement        dsh --profile web --dump-config
+268 cas a la racine, 0 echec                     node --test  (le run racine COLLECTE les paquets)
 CINQ sondes vertes                              probe-stop · probe-mount · probe-fork-guard · probe-lessons
                                                 · probe-owner-gate
 le canal, en service                             3 usages reels ; bornes exercees (2 livres / 5 throttles)
@@ -78,7 +79,41 @@ racine au vert avant qu'on l'etende).
 
 ---
 
-## 4. Les pieges — chacun a coute une passe
+## 4. L'effort : le knobs unique, et ce qui ne suit PAS
+
+Mesure du 2026-10-03, quand la ligne du profil et la session vivante ont diverge pour la premiere fois.
+
+```
+LA LIGNE `agent-default-model.config.reasoningEffort` (profil) est le DEFAUT
+  -> un ENFANT NEUF la prend : la ligne disait `low`, ma session disait `high`, et l enfant
+     lance a l instant a recu `low`. Mesure sur son propre `request/header`.
+  -> les SESSIONS FUTURES aussi.
+
+UNE SESSION VIVANTE garde sa route : la ligne disait `low` depuis 13:27, mon entete disait
+  `high` a seq 7330. Un changement de la ligne ne la traverse pas.
+  -> pour reprendre une session en cours, passer par le SELECTEUR.
+```
+
+**Le selecteur de l'interface ECRIT dans cette ligne** : `saveSelection` fait
+`configEditor.edit(entree, ...)` (`dsh-agent-default-model/lib/index.js:53-66`). Changer le selecteur
+d'une session change donc le **defaut des autres** — et c'est ce qui a rendu ma premiere conclusion
+fausse : tant que la ligne et la session portent la MEME valeur, « l'enfant suit le pere » et
+« l'enfant suit la ligne » predisent exactement la meme chose. Le jour ou elles divergent separe les
+deux hypotheses. **Mesure-les, ne deduis pas du code.**
+
+### Et la hierarchie des paliers, du cote du modele
+
+```
+low = 50   high = 75   max = 100        (encodeur officiel : REASONING_EFFORT_MAPPINGS)
+le defaut du harnais et de l API est `high`
+l'effort n'est PAS un cadran de calcul : c'est un NOMBRE ECRIT DANS LE PROMPT
+  (« Reasoning Effort: {budget} (range 1-100, the higher the value, the more thorough the
+    reasoning) »), rendu au premier message, en mode thinking seulement
+```
+Le rapport technique officiel (arXiv 2609.19969, §B.2/B.3) dit que l'effort fait monter la LONGUEUR
+monotonement, et que la justesse **correle faiblement** — avec des plateaux et des creux aux reglages
+intermediaires. Ce n'est donc pas une echelle de qualite.
+## 5. Les pieges — chacun a coute une passe
 
 **Le cache ESM decide de ce qui est vivant.** Un fichier ecrit n'est pas un fichier charge. Un process
 neuf, ou une ligne NEUVE au refresh — jamais le code d'une ligne deja montee. Trois fois en deux jours.

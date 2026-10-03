@@ -11,10 +11,10 @@ propositions **retirees** (un registre qui cache ses revirements est un document
 
 | # | decision | pourquoi | etat |
 |---|---|---|---|
-| D1 | Le livrable est un **bundle agregateur** : un paquet, un `cordis.patch.yml`, huit lignes | `dsh-app-boot` fait `data.push(...insert)` sans deduplication : huit bundles monteraient chaque ligne une fois — un seul les monte dans l'ordre voulu. (Le canal, sixieme ligne, le budget de contexte, septieme, puis les lecons a la compaction, huitieme, ont ete ajoutes apres ; la decision, elle, n'a pas bouge) | construit, installe pour de vrai, **229 cas verts** a la racine (dont 51 du canal, 24 du budget de contexte et 12 des lecons a la compaction : le run racine collecte les suites des paquets, ne pas les additionner) |
+| D1 | Le livrable est un **bundle agregateur** : un paquet, un `cordis.patch.yml`, dix lignes | `dsh-app-boot` fait `data.push(...insert)` sans deduplication : huit bundles monteraient chaque ligne une fois — un seul les monte dans l'ordre voulu. (Le canal, sixieme ligne, le budget de contexte, septieme, puis les lecons a la compaction, huitieme, ont ete ajoutes apres ; la decision, elle, n'a pas bouge) | construit, installe pour de vrai, **229 cas verts** a la racine (dont 51 du canal, 24 du budget de contexte et 12 des lecons a la compaction : le run racine collecte les suites des paquets, ne pas les additionner) |
 | D2 | **Un depot** : `packages/` (sources), `docs/`, `tools/`, racine = le bundle | consolidation demandee ; le test anti-derive empeche l'agregateur et les sous-paquets de diverger | construit (`dsh-boost`) |
 | D3 | Les sous-paquets gardent leur `dsh.bundle` (installables seuls) **et** l'agregateur insere les memes ids | aucune deduplication a l'insertion : installer les deux monterait chaque ligne **deux fois**. L'exclusion mutuelle est ecrite dans le README | construit |
-| D4 | **Boost possede l'arbre ; AgentTeams n'est pas l'orchestrateur** | un membre AgentTeams ne peut pas porter notre filtre d'outils (`members.js:539`, code en dur) : on perdrait la seule barriere machine du marche. Et sa section hote coute **5 171 caracteres** dans le prompt de chaque agent non-membre | decide sur mesure |
+| D4 | **Quorum possede l'arbre ; AgentTeams n'est pas l'orchestrateur** | un membre AgentTeams ne peut pas porter notre filtre d'outils (`members.js:539`, code en dur) : on perdrait la seule barriere machine du marche. Et sa section hote coute **5 171 caracteres** dans le prompt de chaque agent non-membre | decide sur mesure |
 | D5 | **Prendre l'idee, pas le plugin** : le verdict structure est a nous | la seule chose precieuse de leur cote est un **modele de donnees**, pas un runtime — et il rend les contradictions detectables (0/139 aujourd'hui) | decide |
 | D6 | La garde anti-surrogate est une **remontee amont**, pas un plugin | DSH ecrit lui-meme « is not repaired here » ; `hermes-agent` place le meme chokepoint ; RFC 8259 §8.2 documente la classe | recommande, non lance |
 
@@ -54,7 +54,7 @@ propositions **retirees** (un registre qui cache ses revirements est un document
 | Predicat `tools.get('job_kill')` **sans portee** (ma prescription) | ne lit que la couche globale : aurait retire `run_detached` **dans la composition ou il fonctionne**. La bonne voie est l'objet agent comme cle de portee (`scopeOf(agent.ctx) === agent`) |
 | Attacher notre propre **controleur de jobs** | au niveau hote il elargit l'admission a **tout le process** (pwsh, subagents d'arriere-plan, workflows) ; chez un worker il ne sert jamais la racine |
 | Un **tableau partage** entre agents | aucune mesure ne montre de cout de **coordination** : le cout observe est de la **re-acquisition d'information** |
-| Integrer Boost **dans** AgentTeams (roles = membres) | perdrait le filtre d'outils par role et la profondeur par role, qui n'ont **aucun equivalent** sur le marche |
+| Integrer Quorum **dans** AgentTeams (roles = membres) | perdrait le filtre d'outils par role et la profondeur par role, qui n'ont **aucun equivalent** sur le marche |
 | Un frein sur les **tokens bruts** | 97,08 % du volume est du cache relu, facture ~1/50 : la mesure porterait sur du vent |
 
 ---
@@ -65,7 +65,7 @@ propositions **retirees** (un registre qui cache ses revirements est un document
 Appliquee, redemarree, verifiee (cf. Partie 5). Le journal du relais porte `via:"owner-can-collect"` :
 c'est le format que **seul** le correctif ecrit — donc le code neuf est vivant, ce n'est pas une absence d'erreur.
 
-### 2. Monter AgentTeams **a cote** de Boost ? — **DECIDE : NON**
+### 2. Monter AgentTeams **a cote** de Quorum ? — **DECIDE : NON**
 Coherent avec D4 : **un seul orchestrateur, et c'est le notre.** La coexistence est techniquement prouvee
 (zero avertissement, outils disjoints), mais elle coute **5 171 caracteres de protocole capitaine dans le
 prompt de CHAQUE agent non-membre** — tes verificateurs compris, dont l'independance est toute la valeur.
@@ -90,7 +90,7 @@ elle sert de reference le jour ou ce seuil serait atteint.
 
 ### 6. `dsh-auto-update` dans le depot consolide ? — **DECIDE : NON**
 Cinquieme plugin, **hors `CodeSource`** et hors git (`profiles/local-plugins/`) : c'est de l'infra de
-harnais, pas du mode Boost. Il reste ou il est, et le HANDOVER le documente.
+harnais, pas du mode Quorum. Il reste ou il est, et le HANDOVER le documente.
 
 ### 7. Que faire des cinq depots d'origine apres la coupure ? — **DEPLACE, purement archivistique**
 Ils ne portent PLUS le code que le profil charge : depuis la coupure, le dump resout tout sous
@@ -287,7 +287,7 @@ trouve.
 ## Partie 4 — Ce qui est etabli, quoi qu'on decide
 
 ```
-le livrable est installable et installe pour de vrai (une commande, huit lignes, chacune une fois)
+le livrable est installable et installe pour de vrai (une commande, dix lignes, chacune une fois)
 la documentation est consolidee, les defauts mesures corriges, 231 cas verts a la racine
 la coupure est ecrite et eprouvee sur un clone
 les mesures du corpus : 97,08 % de cache, 86 % de vacance de l'arbre, 0/139 contradictions,

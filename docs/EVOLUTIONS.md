@@ -1,16 +1,16 @@
-# Evolutions du mode Boost — idees instruites par la mesure
+# Evolutions du mode Quorum — idees instruites par la mesure
 
 Etat au 2026-09-30. Ce document remplace la version « idees notees » : chaque proposition est
 desormais confrontee a une mesure du corpus, et certaines sont **dementies**. La regle du projet
 s'applique ici comme ailleurs : une affirmation sans enregistrement a l'appui n'entre pas.
 
 Corpus : **219 journaux de session**, 143 500 enregistrements lus, 40 213 frames zstd, 598 897 068
-octets decodes, `skipped: 0`. Population retenue : **159 enfants boost frais**, 29 racines,
-**10 arbres boost**, 7 464 pas de modele. **4 sessions `isSeeded` exclues** (copies de transcript :
+octets decodes, `skipped: 0`. Population retenue : **159 enfants quorum frais**, 29 racines,
+**10 arbres quorum**, 7 464 pas de modele. **4 sessions `isSeeded` exclues** (copies de transcript :
 `93dc43eb` a 933 de ses 934 enregistrements anterieurs a son propre `createdAt`).
 
 **Precaution de lecture, apprise a la duree de ce corpus : l'en-tete d'une session MENT sur son
-preset.** `agentPreset` est fige a la creation ; 11 des 12 racines boost declarent `standard` alors
+preset.** `agentPreset` est fige a la creation ; 11 des 12 racines quorum declarent `standard` alors
 que l'enregistrement `agent-preset/selected` dit `boost`. Ces 11 sessions portent **40,7 % du volume
 de tokens** — tout garde-fou qui lit l'en-tete est aveugle sur deux cinquiemes de la consommation.
 
@@ -20,7 +20,7 @@ de tokens** — tout garde-fou qui lit l'en-tete est aveugle sur deux cinquiemes
 
 | mesure | valeur |
 |---|---|
-| Volume brut, 173 sessions boost | **1 023 464 901** tokens |
+| Volume brut, 173 sessions quorum | **1 023 464 901** tokens |
 | dont relecture de cache | **993 567 616  (97,08 %)** |
 | **hors cache** (entree non cachee + sortie) | **29 897 285**, + 1 544 712 de compaction = **31 441 997** |
 | Part des enfants dans l'arbre | **58,9 %** du brut, **69,4 %** du hors cache |
@@ -249,7 +249,7 @@ d'outil.
 | « deux freres se contredisent souvent » | **0 paire sur 139** juge le meme commit avec des verdicts opposes |
 | « le tableau partage ferait gagner du temps » | aucun cout de coordination mesure ; le cout est de la re-acquisition |
 | « un frein sur les tokens bruts » | 97,08 % du volume est du cache : la mesure porterait sur du vent |
-| « l'en-tete dit le preset » | faux pour 11 des 12 racines boost, soit **40,7 % du volume** |
+| « l'en-tete dit le preset » | faux pour 11 des 12 racines quorum, soit **40,7 % du volume** |
 | « la profondeur 2 existe dans le corpus » | ce sont des **copies re-racinees**, qui contournent le plafond |
 | « un mecanisme de slot reste a construire » | il existe, il a mordu **9 fois**, et il est **reglable dans l'interface** |
 | « un brief charge economiserait des commandes » | 3,2 % seulement ; il economise des **lectures** (66,1 %) |

@@ -1,4 +1,4 @@
-# Passation — mode Boost DSH
+# Passation — mode Quorum DSH
 
 Document autoportant. Il est écrit pour une session qui **n'a aucun souvenir** de celle qui l'a
 précédé. Lis-le en entier avant d'agir. La bascule du profil vivant sur le dépôt consolidé (§11) est
@@ -15,7 +15,7 @@ occurrences de texte, etc.). **Elles ne sont pas répétées ici** et elles s'ap
 
 ## 1. Où en est le travail, en une ligne
 
-Le mode Boost est **implémenté et vérifié** ; le relais de jobs **fonctionne** ; l'outil `run_detached`
+Le mode Quorum est **implémenté et vérifié** ; le relais de jobs **fonctionne** ; l'outil `run_detached`
 — qui supprime la cause de fond au lieu d'en signaler le symptôme — est **monté, actif et vérifié de
 bout en bout** : un job lancé par un worker lui a survécu 40 s, et la session racine a lu sa sortie.
 Les quatre causes de son échec de montage, plus une cinquième trouvée par le test lui-même, sont
@@ -25,8 +25,8 @@ mesurées et corrigées (§3).
 
 | Élément | État | Preuve |
 |---|---|---|
-| Preset `preset-boost` (mode Boost) | actif | composition mesurée le 2026-10-02 : **1834** lignes (profil `web`), **1785** (`boost-test`), huit ids du mode une fois chacun |
-| `@local/dsh-boost-relay` — relais des jobs d'enfants | **fonctionne**, 14 tests verts | une session Boost a reçu l'avis de teardown de `pwsh-7`, résolution par en-têtes durables comprise ; `node --test test/notice.test.mjs` (5 cas) et `test/journal.test.mjs` (9 cas) |
+| Presets de la famille `quorum` (mode Quorum) | actifs | composition mesurée le 2026-10-02 : **1834** lignes (profil `web`), **1785** (`boost-test`), huit ids du mode une fois chacun |
+| `@local/dsh-boost-relay` — relais des jobs d'enfants | **fonctionne**, 14 tests verts | une session Quorum a reçu l'avis de teardown de `pwsh-7`, résolution par en-têtes durables comprise ; `node --test test/notice.test.mjs` (5 cas) et `test/journal.test.mjs` (9 cas) |
 | Journal du relais | **borné et sans bruit** — commité `8873f5f` | les événements `output`/`progress` ne sont plus tracés : ils faisaient **50,8 %** d'un fichier de 43 Mio qui grandissait sans borne ; rotation à 8 Mio, disque plafonné à 16 Mio. A/B **sur le vrai registre de jobs**, 82 abonnements montés : avis **identiques au byte près** (4 = 4, même texte, même ordre, même canal) pendant que le journal passe de **1895 à 107 enregistrements**. Les chiffres 94 → 19 du premier tour n'étaient pas reproductibles faute de fixture versionnée ; ceux-ci le sont |
 | Filtre d'abonnement du relais | **corrigé** — mesuré, pas supposé | le plugin souscrivait `{ owners: { owner } }`, forme **absente** de l'union `JobEventFilter` (`dsh-jobs/lib/types/types.d.ts:211-222`), alors que le hub ne filtre que sur `owner` **singulier** (`dsh-jobs-local/lib/index.js:75`) : **82 abonnements** par process, 82 enregistrements identiques pour un seul règlement, 78 770 lignes `skip` pour 1 924 règlements. Le global `{ owners: 'all' }` est **conservé** : `ctx.agents.list()` a rendu `[]` à l'installation dans un process où trois agents vivaient, donc un propriétaire jamais énuméré serait invisible |
 | `@local/dsh-detached-jobs` — `run_detached` | **actif et vérifié** | un job lancé par un worker a survécu (`cause=producer` 40,3 s plus tard, **aucun** `teardown`) et la racine a lu `DETACHED-OK` — §5, test 2 |
@@ -160,7 +160,7 @@ Si non : passer à §6.
 
 ### Test 2 — un job détaché survit à son worker (2 minutes)
 
-À faire **depuis cette session Boost** (l'orchestrateur est dans la portée du preset). Déléguer à un
+À faire **depuis cette session Quorum** (l'orchestrateur est dans la portée du preset). Déléguer à un
 worker avec cette consigne **littérale** :
 
 ```
@@ -219,7 +219,7 @@ node --test                                  # attendu : 56/56 (sans argument !)
 node tools/probe-spill-announce.mjs          # attendu : PROBE-PASS, spillPaths non vide, exit 0
 ```
 
-Puis, depuis une session Boost, un job détaché lancé **par la racine elle-même** doit rendre le texte
+Puis, depuis une session Quorum, un job détaché lancé **par la racine elle-même** doit rendre le texte
 de la racine — « It outlives this turn: read it with job_output » — et non la phrase du worker. Enfin
 `job_output` sur un job dont la sortie a dépassé le ring ne doit plus dire
 `full output: (unavailable)` mais citer le chemin, et ce chemin doit finir par `-<6 hexa>.log`.
@@ -267,7 +267,7 @@ livrable. Les cinq dépôts d'origine n'y sont **plus référencés** depuis la 
 | `docs/PLAN.md` | **document historique** : conception, jalons M0-M5, copie du patch qui a divergé, affirmations périmées marquées comme telles |
 | `docs/PROTOCOL.md` | protocole des trois phases + prompt de mission de torture + recevabilité d'une preuve |
 | `tools/` | **douze** fichiers (relevé du 2026-10-02) : `session-log.mjs` (décodage zstd multi-frame), `parse.mjs` (helpers purs, testés), `boost-report.mjs` (rapport de run), `audit.mjs` (contrôles de santé), `protocol.mjs` (notation du protocole), `integrity.mjs` (a-t-on lu l'interdit), `find-text.mjs` (où vit une chaîne), `check-notices.mjs` (le père a-t-il entendu ses fils), `diagnose-frames.mjs` (trame zstd sur disque), `dump-records.mjs` (types et formes d'enregistrements), `tests.test.mjs` (22 cas), `cutover-profile.ps1` (la coupure du profil en une passe, lecture seule par défaut, `-Apply` pour écrire ; il vérifie **six** ids, ceux de la composition du 2026-10-01). `find-clock.mjs` a été **retiré du dépôt** pendant la passe du 2026-09-30 (`git status` : ` D tools/find-clock.mjs`) — ne pas le chercher |
-| `packages/boost-mode/` | `preset-boost` (`@local/dsh-boost-mode`) : `cordis.patch.yml` (persona orchestrateur + trois rôles + leurs `toolFilter`), `lib/index.js`, `README.md` — **aucune suite de tests** |
+| `packages/boost-mode/` | les trois presets `preset-quorum-ptc`, `preset-quorum-standard`, `preset-quorum-shell` (famille `quorum`, `@local/dsh-boost-mode`) : `cordis.patch.yml` (persona orchestrateur + trois rôles + leurs `toolFilter`), `lib/index.js`, `README.md` — **aucune suite de tests** |
 | `packages/boost-relay/` | `boost-job-relay` (`@local/dsh-boost-relay`) : `lib/index.js`, `test/notice.test.mjs` (5), `test/journal.test.mjs` (9), `README.md` — **fonctionne** |
 | `packages/boost-status/` | `boost-status-command` (`@local/dsh-boost-status`) : commande `/boost-status`, `test/status.test.mjs` (10) — active |
 | `packages/detached-jobs/` | `dsh-detached-jobs` (`@local/dsh-detached-jobs`) : `lib/index.js`, `test/root.test.mjs` (10, propriété), `test/apply.test.mjs` (19, activation en contexte strict), `test/shell.test.mjs` (8, résolution du shell), `test/spill.test.mjs` (9, déversement et livraison unique), `test/purge.test.mjs` (10, purge du store), `tools/probe-profile-import.mjs` (résolution par la jonction), `tools/probe-spill-announce.mjs` (annonce par le vrai registre) — **actif et vérifié** |
@@ -659,7 +659,7 @@ lignes 1828-1834).
 
 ### Étape 4 — monter la garde anti-surrogate (§10)
 
-**L'agrégateur la porte déjà** : l'une de ses huit lignes est `dsh-guard-surrogate`
+**L'agrégateur la porte déjà** : l'une de ses dix lignes est `dsh-guard-surrogate`
 (`packages/guard-surrogate/cordis.patch.yml`, `config: { enabled: true }`). Avec la forme **A** de
 l'étape 1, il n'y a donc **rien** à ajouter au patch du profil — c'est précisément ce que l'agrégateur
 apporte en plus des sept autres lignes. Avec la forme **B**, reprendre les quatre gestes du README de

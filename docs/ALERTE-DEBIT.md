@@ -45,7 +45,7 @@ cacheWrite`.
 Le piege, mesure :
 
 ```
-volume total du corpus boost : 1 023 464 901 tokens
+volume total du corpus quorum : 1 023 464 901 tokens
   dont cache relu            :   993 567 616   = 97,08 %   -- facture environ 1/50
   dont entree non cachee     :    22 352 573
   dont sortie                :     7 544 712

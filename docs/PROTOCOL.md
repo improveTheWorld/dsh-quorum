@@ -1,6 +1,6 @@
-# Protocole de torture du mode Boost
+# Protocole de torture du mode Quorum
 
-But : faire produire à un agent Boost les **traces** qui exposent ses propres dérives, puis laisser le
+But : faire produire à un agent Quorum les **traces** qui exposent ses propres dérives, puis laisser le
 **journal** juger. L'agent ne peut pas déclarer un scénario réussi : chaque verdict est dérivé des
 enregistrements que le harnais a écrits (`node tools/protocol.mjs <session-id>`).
 
@@ -12,10 +12,10 @@ rapport déclaré absent alors qu'il était livré, un extracteur qui remontait 
 réponse. **Chaque** fois que le journal a parlé, il avait raison. Un agent qui torture le mode est donc
 utile pour **produire des cas**, jamais pour les évaluer.
 
-## Le prompt de mission (à coller dans une nouvelle session Boost)
+## Le prompt de mission (à coller dans une nouvelle session Quorum)
 
 ```
-Mission : torture le mode Boost dans lequel tu tournes, et produis des traces exploitables.
+Mission : torture le mode Quorum dans lequel tu tournes, et produis des traces exploitables.
 Tu n'as PAS à conclure si le mode fonctionne — tu produis les cas, un outil les jugera.
 
 Cadre strict :
@@ -52,7 +52,7 @@ Chaque scénario vise un défaut **réellement observé** dans un run de product
 
 | # | Défaut visé | Ce que le journal doit montrer |
 |---|---|---|
-| 01 | délégation de base | ≥ 1 enfant `preset=boost`, ≥ 1 avis `subagent-settled` porteur du rapport |
+| 01 | délégation de base | ≥ 1 enfant `preset=quorum-*`, ≥ 1 avis `subagent-settled` porteur du rapport |
 | 02 | fan-out | un programme citant ≥ 2 rôles distincts |
 | 03 | vérification déléguée | un programme avec `await … subagent_verify` et un résultat sans erreur |
 | 04 | plafond de profondeur | `subagent depth N exceeds maxDepth M` dans un enfant, et **aucun** petit-enfant |

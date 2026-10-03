@@ -2,7 +2,7 @@
   "name": "@local/dsh-boost-mode",
   "version": "0.1.0",
   "private": true,
-  "description": "Boost agent preset: multi-agent deep reasoning with role-isolated subagents, adversarial verification, and PTC (Programmatic Tool Calling) for the orchestrator and every child it starts.",
+  "description": "Quorum agent presets: one multi-agent deep-reasoning protocol with role-isolated subagents and adversarial verification, mounted on three shipped bases (ptc, standard, minimal) that share an identical queue.",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",
