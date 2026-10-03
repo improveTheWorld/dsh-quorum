@@ -87,9 +87,11 @@ ignorés, jobs déjà relayés, dernier relais. Aucun coût modèle — c'est un
   dormir. Les deux corrections sont complémentaires.
 - **La perte de l'abstention est réelle — et elle se compte en avis, pas seulement en lectures.**
   La règle « s'abstenir sur un `producer` dont le propriétaire est vivant » supprime **52 avis relayés
-  sur les 52 avis `producer` mesurés** en deux jours (le 53e, `teardown`, reste notifié). **6 de ces 52
-  avis avaient été lus** — taux d'action mesuré : 6 / 52 = 11,5 % — et **l'une de ces 6 lectures a été
-  refusée** (« belongs to another session »), soit au plus **5 lectures utiles**. Ce dernier nombre est
+  sur les 52 avis `producer` mesurés** en deux jours (le 53e, `teardown`, reste notifié). Le recensement
+  indépendant des lectures donne **6 lectures sur les 53 avis** — dont **5 sur les 52 `producer` supprimés**
+  (`pwsh-9`, `pwsh-16`, `pwsh-72`, `pwsh-1`, `pwsh-238`), la sixième (`pwsh-163`) portant sur le `teardown`
+  qui reste notifié. **L'une de ces lectures a été refusée** (« belongs to another session », `pwsh-238`) :
+  la perte est donc au plus **4 lectures utiles sur les `producer`**. Ce dernier nombre est
   une **borne basse** : il ne compte que les avis dont la lecture est *observée*, jamais ceux qu'un
   agent aurait lus plus tard, et il ne compte pas non plus les 52 avis eux-mêmes. **On ne sait PAS si
   ces lectures comptaient.** Ce n'est pas un gain d'efficacité : c'est une mise en cohérence avec une
