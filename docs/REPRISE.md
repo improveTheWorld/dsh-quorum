@@ -1,19 +1,19 @@
-# Reprendre ici — etat au 2026-10-02
+# Reprendre ici — etat au 2026-10-07
 
-Document de PASSATION. Court et actionnable : ce qu'une session neuve doit faire en premier, ce qui
-est verifie, et les pieges qui ont coute du temps. Le detail est dans `HANDOVER.md` ; les choix et
-leurs mesures dans `DECISIONS.md`.
+Document de PASSATION unique et actionnable : tout ce qu'une session neuve doit savoir en premier,
+ce qui est verifie par la mesure, les pieges connus et la feuille de route immediate.
+Reference detaillee : [`HANDOVER.md`](HANDOVER.md), [`DECISIONS.md`](DECISIONS.md), [`README.md`](../README.md).
 
 ---
 
 ## 1. En une ligne
 
-`C:\CodeSource\dsh-boost` est le depot consolide du mode Quorum : **dix lignes** montees par un seul
-bundle installable. Le profil `web` pointe dessus. Etat : **283 cas a la racine, 0 echec**, arbre propre
-(`git log -1` pour le HEAD — un compte ecrit ici perime a chaque commit).
+`C:\CodeSource\dsh-boost` est le depot consolide du mode Quorum, publie sur GitHub :
+**`https://github.com/improveTheWorld/dsh-quorum`** (branche `main` a jour).
+Etat : **291 cas a la racine, 0 echec**, arbre propre. Dix lignes montees par le bundle agregateur.
 
 ```
-les dix lignes, dans l'ordre :
+Les dix lignes montees, dans l'ordre strict :
   preset-quorum-ptc · preset-quorum-standard · preset-quorum-shell ·
   boost-job-relay · boost-status-command · dsh-detached-jobs ·
   dsh-guard-surrogate · dsh-boost-channel · dsh-boost-context-budget · dsh-boost-lessons
@@ -21,159 +21,72 @@ les dix lignes, dans l'ordre :
 
 ---
 
-## 2. A FAIRE EN PREMIER — dans cet ordre
+## 2. A FAIRE EN PREMIER (Dans une session neuve)
 
-### 2.1 Redemarrer le harnais
+### 2.1 Redemarrer le serveur DSH
+Le code JavaScript de 4 paquets (`boost-relay`, `detached-jobs`, `boost-channel`, `guard-surrogate`) a
+change. **Le cache ESM de Node.js ne recharge jamais un module sans redemarrage de process.**
+Faire `Ctrl+C` dans le terminal de `dsh web` puis relancer `dsh web`.
 
-Le code de deux paquets a change APRES leur montage : **le cache ESM ne relit pas un module.** Un
-process neuf charge tout depuis le disque. Ce que le redemarrage apporte :
-
-```
-boost-context-budget : la compaction est devenue une DEMANDE (outil `context_compact`),
-                       un refus n'arme plus rien
-boost-lessons        : la TRACE DE MONTAGE (le signal positif qui manque aujourd'hui)
-```
-
-### 2.2 Verifier le montage — deux signaux, pas une supposition
-
+### 2.2 Verifier la suite de tests
 ```powershell
-dsh --profile web --dump-config     # 0 "not found", les huit ids UNE fois chacun
-Get-Content "$env:USERPROFILE\.dsh\plugin-data\dsh-boost-lessons\decisions.jsonl"
-# doit porter {"step":"mounted","floor":2000,"reseeded":0,...}
-```
-
-La trace de montage est le seul signal POSITIF. Sans elle, « la ligne figure au dump » ne prouve rien :
-un dump liste les lignes `disabled`, et une ligne ajoutee a un bundle n'est montee qu'au refresh.
-
-### 2.3 La premiere mesure qui manque
-
-`plugin-data\dsh-boost-lessons\compactions.jsonl` : il se remplira a la **premiere compaction de
-racine**. Il repond a la question qui decide de l'etape suivante : **a quelle frequence cela se
-declenche-t-il ?** Mesure RETROACTIVE sur le corpus : ~**2,6 par jour**, matiere mediane **517 611
-tokens**. Si la ligne est montee, le compte reel commencera a s'ecrire tout seul.
-
-### 2.4 Deux documents perimes, signales et NON corriges
-
-```
-README.md:117,171   et   docs/HANDOVER.md:276   annoncent encore 32/32 pour boost-context-budget
-                    (il en a 36) et l'ancien comportement (la compaction automatique au refus)
+node --test                          # Doit rendre 291/291 tests passes
+node --test test/aggregate.test.mjs  # Doit rendre 21/21 (anti-derive et integrite)
 ```
 
 ---
 
-## 3. Ce qui est VERIFIE (mesure, pas opinion)
+## 3. Ce qui a ete repare et verifie le 2026-10-06 / 2026-10-07
 
-```
-les dix lignes montees, 0 avertissement        dsh --profile web --dump-config
-283 cas a la racine, 0 echec                     node --test  (le run racine COLLECTE les paquets)
-CINQ sondes vertes                              probe-stop · probe-mount · probe-fork-guard · probe-lessons
-                                                · probe-owner-gate
-le canal, en service                             3 usages reels ; bornes exercees (2 livres / 5 throttles)
-la garde du fork                                 egalite a DELTA 0 TOKEN sur un fork REEL
-le fork reel                                     46,31 %, verdict ok, l'enfant re-mesure 463 106
-```
-
-**Un test vert ne prouve pas sa portee.** Lire ce qu'un test compare avant de s'y fier : celui de
-l'anti-derive compare la LIGNE entiere hors `name` (un `disabled: true` faisait passer une ligne
-racine au vert avant qu'on l'etende).
-
----
-
-## 4. L'effort : le knobs unique, et ce qui ne suit PAS
-
-Mesure du 2026-10-03, quand la ligne du profil et la session vivante ont diverge pour la premiere fois.
-
-```
-LA LIGNE `agent-default-model.config.reasoningEffort` (profil) est le DEFAUT
-  -> un ENFANT NEUF la prend : la ligne disait `low`, ma session disait `high`, et l enfant
-     lance a l instant a recu `low`. Mesure sur son propre `request/header`.
-  -> les SESSIONS FUTURES aussi.
-
-UNE SESSION VIVANTE garde sa route : la ligne disait `low` depuis 13:27, mon entete disait
-  `high` a seq 7330. Un changement de la ligne ne la traverse pas.
-  -> pour reprendre une session en cours, passer par le SELECTEUR.
-```
-
-**Le selecteur de l'interface ECRIT dans cette ligne** : `saveSelection` fait
-`configEditor.edit(entree, ...)` (`dsh-agent-default-model/lib/index.js:53-66`). Changer le selecteur
-d'une session change donc le **defaut des autres** — et c'est ce qui a rendu ma premiere conclusion
-fausse : tant que la ligne et la session portent la MEME valeur, « l'enfant suit le pere » et
-« l'enfant suit la ligne » predisent exactement la meme chose. Le jour ou elles divergent separe les
-deux hypotheses. **Mesure-les, ne deduis pas du code.**
-
-### Et la hierarchie des paliers, du cote du modele
-
-```
-low = 50   high = 75   max = 100        (encodeur officiel : REASONING_EFFORT_MAPPINGS)
-le defaut du harnais et de l API est `high`
-l'effort n'est PAS un cadran de calcul : c'est un NOMBRE ECRIT DANS LE PROMPT
-  (« Reasoning Effort: {budget} (range 1-100, the higher the value, the more thorough the
-    reasoning) »), rendu au premier message, en mode thinking seulement
-```
-Le rapport technique officiel (arXiv 2609.19969, §B.2/B.3) dit que l'effort fait monter la LONGUEUR
-monotonement, et que la justesse **correle faiblement** — avec des plateaux et des creux aux reglages
-intermediaires. Ce n'est donc pas une echelle de qualite.
-## 5. Les pieges — chacun a coute une passe
-
-**Le cache ESM decide de ce qui est vivant.** Un fichier ecrit n'est pas un fichier charge. Un process
-neuf, ou une ligne NEUVE au refresh — jamais le code d'une ligne deja montee. Trois fois en deux jours.
-
-**Un patch de bundle modifie seul n'est JAMAIS relu.** `dsh-hmr` ne surveille que le patch du profil,
-son `package.json` et `$DSH_HOME/cordis.patch.yml`. Toucher le patch du profil force le refresh.
-
-**Un dump n'est pas un montage.** Il liste des lignes `disabled`, et `--dump-config` montre la config
-composee, pas l'etat du process.
-
-**Les fins de ligne different.** Le patch RACINE et celui de `boost-mode` sont **CRLF** ; les sept
-autres patches de paquets sont **LF**. Ne jamais editer par decoupage/recollage sur `\n` : un `\r` s'est
-deja retrouve au milieu d'une phrase.
-
-**Un test lance sur un arbre qui bouge ne mesure rien.** Vu en direct : `230/1 -> 223/8 -> 224/7 ->
-235/235` pendant qu'une autre session editait le meme paquet.
-
-**Une surcharge de preset depuis le profil REMPLACE la config en bloc** (`target[key] = value`, « config
-is replaced wholesale, not deep-merged »). Les lignes internes (`persona`) ne sont pas adressables.
-
-**La mesure est l'endroit ou vivent les erreurs.** Douze fois en deux jours, un chiffre etait juste et sa
-LECTURE fausse — un en-tete vide qui fait passer toutes les sessions pour des racines, deux fois de
-suite ; trois cuts mesures dont un seul cite ; les fins de ligne generalisees a tort a huit fichiers.
-**Regle ecrite dans les personas et dans AGENTS.md : les outils mesurent, le raisonnement juge.**
+1. **`quorum-shell` repare** : la collision d'outils entre la base (`persistent-pwsh`) et la queue
+   (`tool-pwsh`) qui empechait tout chargement de session shell a ete supprimee. La famille persistante
+   de la base est conservee, le one-shot est retire (T-Q10 borne l'invariant).
+2. **Bouclier d'immunite Agent Teams** : `packages/guard-surrogate/lib/agent-teams-shield.js` intercepte
+   `ctx.agentTeams.tryMembership(agent)` pour exclure les sessions Quorum. `tool-agent-team` n'injecte
+   plus ses 9 outils dans Quorum, et le masquage de `send_message` est definitivement supprime.
+   Valide unitairement (5 tests) et sur un hote DSH reel montant simultanement les deux bundles.
+3. **Fuite de notices entre sessions forkees resolue** : `rootOf`, `chainOf` et `liveRootOf` dans
+   `boost-relay`, `detached-jobs` et `boost-channel` s'arretent desormais sur les racines autonomes
+   (`isAutonomousRoot` : `delegationDepth === 0` et `origin !== 'subagent'`). Les jobs d'une session
+   forkee ne fuient plus jamais vers l'ancetre (T-U7).
+4. **Contrat de brief pour `subagent_implement`** : la persona impose un gabarit en 4 volets
+   (chemin absolu, lignes cibles, ancre de 5-10 lignes, commande de test) pour couper court aux 15
+   dispatches d'exploration aveugles de l'ouvrier (gain net mesure : 15 000 a 40 000 tokens par worker).
+5. **Migration des 324 anciennes sessions `boost`** : toutes ont recu un evenement d'adoption
+   `agent-preset/selected { agentPreset: 'quorum-ptc' }`. En-tete conserve, projection a jour, ouverture
+   reussie sans `agent-preset/not-found`. Outils et rollback sous `~/.dsh/boost-migration/`.
+6. **Packaging autonome (Option A)** : `package.json` embarque `packages/` dans sa distribution.
+   Archive testee et installable en 1 clic.
 
 ---
 
-## 5. Les choix OUVERTS
+## 4. Ce que le corpus a mesure (Faits clairs, 4,78 milliards de tokens)
 
-```
-l'extracteur de lecons (etape 3)   la frequence se mesure ; la QUALITE des lecons reste a prouver
-l'alerte de debit en dollars        spec ecrite (ALERTE-DEBIT.md), RIEN de construit
-les 4 constantes du jeton          a calibrer sur des JOURS de trafic reel
-multi-process                      « jamais perdu » est FAUX (7 echecs sur 342) — limite declaree
-la remontee amont                  le demi-caractere UTF-16 : ecrite, pas postee
-archiver les cinq depots d'origine purement archivistique — ils portent un FROZEN.md
-```
+* **Volume brut** : 351 sessions Quorum reelles, 4 789 810 024 tokens.
+* **KVCache** : **97,86 %** de relecture de cache (4,68 Mds tokens en cache), ultra-rentable.
+* **Falsification adversariale** : sur 107 verifications par `subagent_verify`, **16 FAIL nets**
+  ont ete captures (15 % de livraisons defectueuses interceptees avant conclusion).
+* **Temps de cycle** : depuis la stabilisation du 2 octobre au soir, **0 blocage > 21 min** n'a
+  eu lieu (les blocages d'1h30 a 2h appartenaient tous a la phase pre-stabilisation).
 
 ---
 
-## 6. Les documents
+## 5. PROCHAIN OBJECTIF : Le "Quorum Model Resolver" & Matrice des Modeles
 
-```
-HANDOVER.md            la reference : installation, coupure (§11 FAITE), inventaire, recettes
-DECISIONS.md           7 parties : 22 decisions mesurees, 6 propositions RETIREES, les choix ouverts
-CANAL.md               la conception du canal de retour (7 regles, la table du reveil)
-LECONS.md              la spec des lecons a la compaction (coutures mesurees, cinq pieges)
-ALERTE-DEBIT.md        la spec de l'alerte globale en dollars
-EVOLUTIONS.md          le plan, instruit par la mesure du corpus
-UPSTREAM-SURROGATE.md  la remontee de defaut, prete a poster
-PLAN.md · PROTOCOL.md  documents d'epoque, dates
-```
+Le besoin : l'utilisateur utilise parfois un modele tres haut de gamme et cher (Claude Opus, Gemini Pro)
+pour la reflexion strategique et la conception de methode. Il veut que l'orchestrateur prepare le
+travail mais que les sous-agents ouvriers n'heritent JAMAIS de cette route hors de prix.
 
----
+### 5.1 Matrice d'evaluation des modeles cibles
+Etablir une grille simple sur 3 axes notes de 1 a 5 :
+- **QI / Raisonnement** (1: basique -> 5: super-raisonneur / o3 / Opus)
+- **Cout / Prix** (1: gratuit/tres pas cher -> 5: tres cher)
+- **Rapidite / Latence** (1: tres lent -> 5: instantane)
 
-## 7. Pour continuer le travail
-
-Le seul chiffre qui manque aujourd'hui est la **frequence reelle des compactions de racine**. Il
-decide si les lecons sont un outil ou une usine. Il s'ecrit tout seul — il suffit que la ligne soit
-montee et qu'une compaction survienne.
-
-Ensuite, dans l'ordre que `DECISIONS.md` propose : **les lecons** (etape 3), puis **l'alerte de debit**.
-Et pour toute nouvelle mesure : ecrire la trace d'abord, formuler l'hypothese ensuite.
+### 5.2 Arbitrage et bascule dynamique de quota
+- Priorite 1 (Gratuit / Quota fenetre) : Gemini via Antigravity proxy (quota par fenetre de 5 heures).
+- Repli automatique quand le quota est epuise : basculer sur `deepseek-v4.1-flash` via API payante
+  (tres bon marche, rapide, intelligence suffisante pour l'execution et les tests).
+- Decouplage d'heritage : quand le parent tourne sur un modele Tier Premium (note QI >= 4 ou Prix >= 4),
+  les outils `subagent_investigate`, `subagent_implement`, `subagent_verify` forcent automatiquement
+  leur route vers le modele de travail economique (`agentDefaultModel` ou resolver).
