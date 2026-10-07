@@ -2,7 +2,7 @@
 
 > **Deep multi-agent reasoning with mandatory adversarial verification for DeepSeek Harness (inspired by Antigravity `/boost`).**
 
-[![Tests](https://img.shields.io/badge/tests-288%20passed-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-291%20passed-brightgreen)](#tests)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.1.6-orange)](https://github.com/deepseek-ai/dsh)
 
@@ -123,9 +123,9 @@ dsh-guard-surrogate · dsh-boost-channel · dsh-boost-context-budget · dsh-boos
 | Paquet | Rôle | Tests |
 |---|---|---|
 | `packages/boost-mode/` | Les 3 presets Quorum (`quorum-ptc`, `quorum-standard`, `quorum-shell`) | Anti-dérive racine |
-| `packages/boost-relay/` | Relais hôte des règlements de jobs orphelins vers la racine | 28/28 |
+| `packages/boost-relay/` | Relais hôte des règlements de jobs orphelins vers la racine | 29/29 |
 | `packages/boost-status/` | Commande `/boost-status` lisible même en cours d'appel d'outil | 10/10 |
-| `packages/detached-jobs/` | Outil `run_detached` pour jobs persistants rattachés à la racine | 56/56 |
+| `packages/detached-jobs/` | Outil `run_detached` pour jobs persistants rattachés à la racine | 58/58 |
 | `packages/guard-surrogate/` | Réparation des surrogates UTF-16 isolés + Bouclier d'immunité Agent Teams | 31/31 |
 | `packages/boost-channel/` | Canal typé à double bourse (`channel_post`, `channel_read`) | 52/52 |
 | `packages/boost-context-budget/` | Mesure d'occupation, garde du fork et compaction demandée | 36/36 |
@@ -142,7 +142,7 @@ La suite complète s'exécute avec le runner natif de Node.js :
 node --test
 ```
 
-**Résultat : 288/288 tests passés, 0 échec.**
+**Résultat : 291/291 tests passés, 0 échec.**
 
 * `test/aggregate.test.mjs` : Test anti-dérive strict garantissant la cohérence absolue entre le patch agrégateur racine et les sous-paquets.
 * Éprouvé en conditions réelles sur un corpus mesuré de plus d'**un milliard de tokens**.

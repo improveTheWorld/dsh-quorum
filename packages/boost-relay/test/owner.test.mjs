@@ -42,10 +42,10 @@ const home = mkdtempSync(join(tmpdir(), 'dsh-relay-owner-'))
 const frame = (record) => zstdCompressSync(Buffer.from(JSON.stringify(record) + '\n', 'utf8'))
 
 /** One durable session log, header first — the only record `headers()` reads. */
-function writeSession(id, parentSession) {
+function writeSession(id, parentSession, extra = {}) {
   const dir = join(home, 'sessions', 'ws', id)
   mkdirSync(dir, { recursive: true })
-  const header = parentSession === undefined ? { type: 'session', id } : { type: 'session', id, parentSession }
+  const header = { type: 'session', id, ...parentSession === undefined ? {} : { parentSession }, ...extra }
   writeFileSync(join(dir, 'session.v4.jsonl.zstd'), Buffer.concat([frame(header), frame({ type: 'turn/start' })]))
 }
 
@@ -65,6 +65,10 @@ writeSession('session-t3-leaf', 'session-t3-mid')
 // T-U4 — a dead durable root and NO live ancestor anywhere above the owner.
 writeSession('session-t4-dead')
 writeSession('session-t4-leaf', 'session-t4-dead')
+// T-U7 — a user fork: isSeeded true, delegationDepth 0. Must be its own autonomous root.
+writeSession('session-t7-parent')
+writeSession('session-t7-fork', 'session-t7-parent', { isSeeded: true, delegationDepth: 0 })
+writeSession('session-t7-worker', 'session-t7-fork', { delegationDepth: 1, origin: 'subagent' })
 
 // The relay resolves its harness dependency from the host's own argv[1] anchor, which does not
 // exist under `node --test`; DSH_PROFILE_DIR is the documented fallback. DSH_HOME decides the
@@ -230,4 +234,20 @@ test('T-U6 with no agents service the relay degrades in the journal instead of f
     'the degradation must be journalled, never silent')
   assert.equal(journal.some((record) => record.step === 'bail' && record.why === 'agents-service-absent'), true,
     'and the resolution must say it could not confirm a live root')
+})
+
+test('T-U7 a user fork is an autonomous root: notices must NOT leak to the parent session', async () => {
+  // Both the parent session and the user fork are LIVE in the process.
+  // A worker launched in the fork finishes.
+  // The notice must be delivered to session-t7-fork, NEVER to session-t7-parent!
+  const { sent, journal } = await settle('session-t7-worker', {
+    'session-t7-parent': { status: 'running' },
+    'session-t7-fork': { status: 'running', parent: 'session-t7-parent' },
+  }, { jobId: 'pwsh-owner-7' })
+
+  assert.equal(sent.length, 1, 'exactly one notice delivered')
+  assert.equal(sent[0].to, 'session-t7-fork', 'notice MUST be delivered to the forked session, NEVER to the parent')
+  assert.equal(sent.some((m) => m.to === 'session-t7-parent'), false, 'parent session must receive NO notice')
+  const resolveRecord = journal.find((r) => r.step === 'resolve' && r.job === 'pwsh-owner-7')
+  assert.equal(resolveRecord?.rootId, 't7-fork', 'root must resolve to t7-fork, stopping at the autonomous root')
 })

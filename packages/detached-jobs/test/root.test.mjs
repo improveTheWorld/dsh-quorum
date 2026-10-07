@@ -52,6 +52,10 @@ writeSession(WS, 'session-grandchild', { agentPreset: 'boost', parentSession: 's
 // The fork: a parent link but no delegation origin and depth 0, which is what a
 // `subagent_fork` produces and what the delegated-child catalog cannot see.
 writeSession(WS, 'session-fork', { agentPreset: 'cordis', parentSession: 'session-root' })
+// A real user fork: conversation continuation with depth 0 and isSeeded true.
+writeSession(WS, 'session-user-fork', { agentPreset: 'quorum-ptc', parentSession: 'session-root', isSeeded: true, delegationDepth: 0 })
+// A child worker launched from inside the user fork.
+writeSession(WS, 'session-fork-child', { agentPreset: 'quorum-ptc', parentSession: 'session-user-fork', delegationDepth: 1, origin: 'subagent' })
 writeSession(WS, 'session-truncated', { agentPreset: 'boost', parentSession: 'session-root', delegationDepth: 1 }, { truncateTail: true })
 // A cycle, to prove the hop bound terminates instead of hanging the host.
 writeSession(WS, 'session-cycle-a', { parentSession: 'session-cycle-b' })
@@ -84,6 +88,17 @@ test('a FORK resolves through its parent link', () => {
   // catalog reported no descendant here, which is why ownership resolution no
   // longer asks a catalog.
   assert.equal(rootOf('session-fork'), 'session-root')
+})
+
+test('a USER FORK (depth 0, isSeeded true) is its own autonomous root', () => {
+  // Production case: user forks session-root into a new conversation branch.
+  // The forked conversation MUST NOT delegate ownership or leak jobs to the ancestor session.
+  assert.equal(rootOf('session-user-fork'), 'session-user-fork')
+})
+
+test('a child worker of a user fork resolves to the fork, NOT the ancestor', () => {
+  // A worker launched by session-user-fork belongs to session-user-fork, never to session-root.
+  assert.equal(rootOf('session-fork-child'), 'session-user-fork')
 })
 
 test('a truncated tail frame does not prevent resolution', () => {

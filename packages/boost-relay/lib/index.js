@@ -274,11 +274,32 @@ function headers() {
  *
  * @returns the root session id, the last readable link's parent id, or undefined.
  */
+/**
+ * Whether a session is an autonomous conversation root rather than a delegated subagent.
+ *
+ * An autonomous root:
+ * - has no `parentSession`, OR
+ * - has `delegationDepth: 0` (or `isSeeded: true`) with `origin !== 'subagent'` (a user fork or continued session).
+ *
+ * It must NOT leak its ownership, jobs, or notices to an ancestor conversation it was forked from.
+ */
+function isAutonomousRoot(header) {
+  if (!header) return false
+  if (header.parentSession === undefined || header.parentSession === null || header.parentSession === '') {
+    return true
+  }
+  if ((header.delegationDepth === 0 || header.isSeeded === true) && header.origin !== 'subagent') {
+    return true
+  }
+  return false
+}
+
 function rootOf(ownerId) {
   const byId = headers()
   let current = byId.get(ownerId)
   if (current === undefined) return undefined
   for (let hop = 0; hop < 16; hop++) {
+    if (isAutonomousRoot(current)) return current.id
     const parent = current.parentSession
     if (parent === undefined || parent === null) return current.id
     const next = byId.get(parent)
@@ -310,6 +331,7 @@ function chainOf(ownerId) {
   if (current === undefined) return []
   const chain = [current.id]
   for (let hop = 0; hop < 16; hop++) {
+    if (isAutonomousRoot(current)) return chain
     const parent = current.parentSession
     if (parent === undefined || parent === null) return chain
     current = byId.get(parent) ?? { id: parent }

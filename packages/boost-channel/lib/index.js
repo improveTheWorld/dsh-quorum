@@ -836,7 +836,13 @@ export function defaultMessage(envelope) {
 export function liveRootOf(agents, id, maxHops = 16) {
   let current = id
   for (let hop = 0; hop < maxHops; hop++) {
-    const parent = agents?.get?.(current)?.session?.header?.parentSession
+    const agent = agents?.get?.(current)
+    const header = agent?.session?.header
+    if (header) {
+      if (header.parentSession === undefined || header.parentSession === null || header.parentSession === '') return current
+      if ((header.delegationDepth === 0 || header.isSeeded === true) && header.origin !== 'subagent') return current
+    }
+    const parent = header?.parentSession
     if (typeof parent !== 'string' || parent === '' || parent === current) return current
     // Le parent n'est plus vivant : 'current' est le plus haut ancetre VIVANT,
     // donc le proprietaire. Rendre 'parent' designerait une session morte.
