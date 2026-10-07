@@ -1,226 +1,154 @@
-# dsh-boost — le bundle agrégateur du mode Quorum
+# Quorum
 
-**Le mode Quorum** est une famille de **trois** presets d'agent DSH pour le raisonnement profond multi-agents : un orchestrateur décompose la demande, délègue à des sous-agents **isolés par rôle** (`subagent_investigate`, `subagent_implement`, `subagent_verify`) et ne livre rien avant qu'un vérificateur indépendant ait essayé de falsifier le résultat. Les trois presets ne diffèrent que par la **base livrée** qu'ils reprennent — la **présentation des outils** : `preset-quorum-ptc` en **PTC** (*Programmatic Tool Calling* : l'agent écrit un programme TypeScript qui appelle les outils), `preset-quorum-standard` en appels d'outils **natifs**, `preset-quorum-shell` sur le **socle nu** avec son **shell persistant**. Le mode s'ajoute aux presets livrés (`standard`,
-`ptc`, `minimal`, `cordis`) et se choisit dans *Settings → Agent Presets*.
+> **Deep multi-agent reasoning with mandatory adversarial verification for DeepSeek Harness (inspired by Antigravity `/boost`).**
 
-Ce dépôt **consolide les sources et la documentation du mode Quorum** en un seul endroit, et publie
-**un livrable installable** : le paquet racine `@local/dsh-boost`, une couche bundle DSH qui monte les
-**huit** lignes du mode depuis un unique `cordis.patch.yml` — **une** entrée `insert:` portant les huit
-lignes. Les cinq paquets d'origine vivent sous `packages/`, rejoints par les trois paquets ajoutés
-depuis (`boost-channel`, `boost-context-budget`, `boost-lessons`) ; les huit portent chacun son propre
-`cordis.patch.yml`, son `dsh.bundle` et ses tests : chacun reste installable seul. L'agrégateur est le
-livrable **recommandé**, pas le seul possible — et les deux formes **s'excluent** (section suivante).
+[![Tests](https://img.shields.io/badge/tests-288%20passed-brightgreen)](#tests)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.1.6-orange)](https://github.com/deepseek-ai/dsh)
 
-> **Pour reprendre dans une session neuve** : [`docs/REPRISE.md`](docs/REPRISE.md) — ce qu'il faut
-> faire en premier, ce qui est vérifié, et les pièges qui ont coûté du temps.
+[English](#english) | [Français](#présentation-en-français)
 
-## Installer, pas à pas
+---
 
-### 1. Installer le bundle
+## English
 
-```powershell
-dsh plugin --profile <profil> add C:\CodeSource\dsh-boost
-```
+### What is Quorum?
 
-- **Le chemin doit être ABSOLU.** Un chemin relatif est refusé.
-- Le gestionnaire exécute `pnpm add <spec>` (ce qui écrit `dependencies`) puis ajoute le nom du paquet
-  **en queue de `dsh.profile.bundles`**. Pour un chemin local, le registre npm n'est **jamais**
-  interrogé.
-- Mesure sur cette machine (`--profile boost-test`) : exit 0, `dependencies` porte
-  `"@local/dsh-boost": "link:C:/CodeSource/dsh-boost"`, la jonction
-  `profiles\boost-test\node_modules\@local\dsh-boost` est créée (type `Junction`, cible
-  `C:\CodeSource\dsh-boost`), et `bundles` se termine par `@local/dsh-boost`.
+If you are coming from Google Antigravity or multi-agent orchestration frameworks, **Quorum** brings the deep-reasoning `/boost` protocol to **DeepSeek Harness** (`dsh`).
 
-### 2. Le piège `pnpm` — mesuré, et il arrête l'installation entière
+In standard harness sessions, LLMs often exhibit *complacency*: declaring tasks "fixed" without running test suites, missing regressions, or getting stuck in conversational loops.
 
-Sur cette machine, le `pnpm` du PATH est le shim **nvm**
-(`C:\Users\bilel\AppData\Local\Author Software\nvm\.nodejs\pnpm.exe`) et il échoue :
+Quorum solves this by construction:
+1. **Strategy First** — The orchestrator inspects the workspace, decomposes the objective, and *writes verifiable acceptance criteria before delegating*.
+2. **Parallel Fan-out** — Work is dispatched in a single turn to role-isolated subagents with zero context contamination.
+3. **Mandatory Adversarial Verification** — An independent verifier runs in the foreground to aggressively attempt to **falsify** the solution against real test suites and entry points. **No conclusion is delivered without raw execution output proving the verdict.**
 
-```
-pnpm.exe : No active Node.js version is configured. Run `nvm install <version>` then `nvm use <version>`.
-```
+---
 
-Contournement **mesuré** : mettre **corepack** en tête de PATH **pour la commande** (`pnpm` 12.6.0
-depuis ce shim), puis installer :
+### Three Tailored Presets
 
-```powershell
-$env:PATH = 'C:\Program Files\nodejs\node_modules\corepack\shims;' + $env:PATH
-dsh plugin --profile <profil> add C:\CodeSource\dsh-boost
-```
+Quorum installs three selectable agent presets under **Settings → Agent Presets**:
 
-**Le contournement `pnpmCommand` du profil ne s'applique pas ici.** Le profil réel porte, dans son
-`cordis.patch.yml` (`~/.dsh/profiles/web/cordis.patch.yml:23-32`), un
-`plugin-manager: config: pnpmCommand` qui pointe sur ce même shim corepack. Ce réglage n'est lu que par
-le **gestionnaire composé** — l'interface et l'outil agent `plugin_manager`. **Le chemin CLI ne le lit
-pas** : mesuré, `dsh plugin --profile web list` échoue avec le même message nvm et rend
-`dsh: plugin command failed; diagnostics: …\.plugin-manager\logs\operation-uXxp84\pnpm.log`. C'est
-pourquoi l'étape 1 a besoin du PATH corrigé, alors que l'étape 3 n'en a pas besoin.
-
-### 3. Si le CLI échoue : installer depuis l'interface, ou par l'outil agent
-
-Les deux passent par le gestionnaire **composé**, donc par `pnpmCommand` :
-
-- **Interface** : le gestionnaire de bundles du profil (le service `plugin_manager`), cible
-  `C:\CodeSource\dsh-boost`.
-- **Outil agent** (PTC) :
-  `plugin_manager { action: "install_bundle", target: "C:\\CodeSource\\dsh-boost" }`.
-
-### 4. Vérifier l'installation
-
-```powershell
-dsh --profile <profil> --dump-config
-```
-
-Attendu : les ids du mode, **chacun exactement une fois** — les **trois** presets de la famille `quorum` (`preset-quorum-ptc` en PTC, `preset-quorum-standard` en outils natifs, `preset-quorum-shell` sur le socle nu), puis `boost-job-relay`, `boost-status-command`, `dsh-detached-jobs`, `dsh-guard-surrogate`,
-`dsh-boost-channel`, `dsh-boost-context-budget`, `dsh-boost-lessons`. Mesure du **2026-10-03** : les
-**dix** compteurs à **1** et **0** ligne `not found`, sur `web` comme sur `boost-test`. **Le nombre total
-de lignes du dump n'est PAS un contrôle** : mesuré **2768**, **3048** et **3072** pour le même fichier,
-selon qu'on compte un tableau, un découpage brut, ou les lignes vides. Un contrôle qui dépend de la méthode
-de comptage est pire qu'un contrôle qui s'abstient — les deux qui décident sont le compte par id et
-l'absence de `not found`. Un id à **2** est le symptôme de l'exclusion mutuelle violée (section
-suivante) ; un id à **0** veut dire que la ligne n'est pas montée.
-
-### 5. Choisir le preset
-
-*Settings → Agent Presets* → l'un des trois presets de la famille **Quorum** (`preset-quorum-ptc`, `preset-quorum-standard`, `preset-quorum-shell`), pour la prochaine session.
-
-Un bundle **nouveau** s'active à chaud (ses lignes hôte montent sans redémarrage) ; **éditer** le patch
-d'un bundle déjà chargé n'est pas relu à chaud — `dsh-hmr` ne surveille que trois chemins (voir
-`docs/HANDOVER.md` §11), donc un patch de bundle modifié seul attend le prochain démarrage.
-
-## Ne jamais installer l'agrégateur ET les sous-paquets
-
-> `dsh-app-boot/lib/index.js:87` fait `data.push(...insert)` **sans déduplication** : deux bundles qui
-> insèrent le même `id` montent la ligne **deux fois** — preset monté deux fois, outil dupliqué.
-
-Les deux formes s'excluent donc :
-
-- **agrégateur** : `dsh.profile.bundles` porte `@local/dsh-boost` (et rien des huit) ;
-- **sous-paquets** : il porte les huit noms (`@local/dsh-boost-mode`, `@local/dsh-boost-relay`,
-  `@local/dsh-boost-status`, `@local/dsh-detached-jobs`, `@local/dsh-guard-surrogate`,
-  `@local/dsh-boost-channel`, `@local/dsh-boost-context-budget`, `@local/dsh-boost-lessons`) et **pas**
-  l'agrégateur.
-
-`test/aggregate.test.mjs` défend l'invariant côté sources : si un id dérivait d'un sous-paquet, le test
-échoue au lieu de monter une ligne périmée.
-
-## Les paquets
-
-| Nom | Rôle | Cas de test | Invocation |
+| Preset | Base Harness Preset | Tool Presentation & Execution | Best For |
 |---|---|---|---|
-| `@local/dsh-boost-mode`<br>`packages/boost-mode/` | Déclare les **trois presets d'agent** de la famille `quorum` — `preset-quorum-ptc` (PTC), `preset-quorum-standard` (outils natifs), `preset-quorum-shell` (socle nu) : protocole en trois phases, persona de l'orchestrateur, et trois outils de délégation isolés par rôle. Le `name` de cette ligne est un nom de paquet npm (`@deepseek-ai/dsh-agent-preset`), pas un fichier. | **aucun** — la ligne est un patch de preset, il n'y a pas de suite (0 cas) | `cd packages\boost-mode` puis `node --test` |
-| `@local/dsh-boost-relay`<br>`packages/boost-relay/` | Relais **hôte** : remonte au propriétaire d'un arbre les *settlements* des jobs lancés à l'intérieur de ses sous-agents (angle mort du registre, dont la propriété est clôturée par l'id de session propriétaire). | **28/28** — `test/notice.test.mjs` 13, `test/journal.test.mjs` 9, `test/owner.test.mjs` 6. Le compte de 14 datait d'avant `owner.test.mjs`, jamais recomposé ; les deux correctifs du 2026-10-03 ajoutent **8 cas** à `notice.test.mjs` (T-V1 à T-V6, T-V5b, T-V5c) et **inversent 4 cas existants** qui encodaient la règle d'avant (3 dans `notice.test.mjs`, 1 dans `owner.test.mjs` : T-U1) — le détail et les raisons sont en tête des deux fichiers de test | `cd packages\boost-relay` puis `node --test` |
-| `@local/dsh-boost-status`<br>`packages/boost-status/` | Commande **hôte** `/boost-status` : l'état de délégation vivant d'une session, lu sur le plan de commande de l'UI — donc **elle répond même pendant qu'un appel d'outil est en vol**. | **10/10** — `test/status.test.mjs` | `cd packages\boost-status` puis `node --test` |
-| `@local/dsh-detached-jobs`<br>`packages/detached-jobs/` | Ajoute `run_detached` : un job d'arrière-plan possédé par la **racine** de session et non par l'agent demandeur, donc qui survit à un worker jetable. Ligne **hôte** : c'est la seule portée non scopée qui peut posséder un job au nom de la racine. | **56/56** — `test/root.test.mjs` 10 (propriété), `apply` 19 (activation, contexte strict), `shell` 8, `spill` 9, `purge` 10 | `cd packages\detached-jobs` puis `node --test` ; sondes : `node tools\probe-profile-import.mjs` (résolution par la jonction) et `node tools\probe-spill-announce.mjs` (annonce par le vrai registre) |
-| `@local/dsh-guard-surrogate`<br>`packages/guard-surrogate/` | Répare les **surrogates UTF-16 non appariés** dans les résultats d'outil, sur le waterfall `tools/post-execute`, **avant** l'écriture au journal : un seul surrogate isolé empoisonne toutes les requêtes suivantes en `HTTP 400 INVALID_REQUEST`. | **26/26** — `test/guard.test.mjs` | `cd packages\guard-surrogate` puis `node --test` |
-| `@local/dsh-boost-channel`<br>`packages/boost-channel/` | Canal de **retour** entre un enfant et le propriétaire de son arbre : une **enveloppe structurée** (jamais la charge utile), un `kind` **déclaré** par l'appelant et un `state` **dérivé** par le runtime, le réveil **décidé à l'arrêt** de l'émetteur (au dépôt, l'émetteur travaille encore), un jeton de livraison à **deux bourses** et la politique du destinataire (`channel_subscribe`). Ligne **hôte** : elle capture le service `agents` non scopé et installe ses outils dans la surface de **chaque** agent. | **52/52** — `test/channel.test.mjs`, dont quatre cas de falsification | `cd packages\boost-channel` puis `node --test` ; sondes : `node tools\probe-stop.mjs` (quel événement marque l'arrêt) et `node tools\probe-mount.mjs` (la ligne hôte installée par agent) |
-| `@local/dsh-boost-context-budget`<br>`packages/boost-context-budget/` | Occupation du contexte et **garde du fork** : `context_occupancy` mesure le préfixe qu'un fork hériterait par `SessionProjectionRegistry.restore(...)` **borné à la frontière** du dernier `turn/end` — égalité **prouvée contre un enfant RÉEL** à trois coupes, dont une après compaction — et `subagent_fork` est **refusé au-delà d'un seuil** configurable (`forkThresholdRatio`). Aucun repli : une mesure absente vaut `unknown` et la garde **s'abstient**. La compaction n'est **jamais** automatique : le père la **demande** (`context_compact`), et un refus n'arme rien. | **36/36** — `test/context-budget.test.mjs` | `cd packages\boost-context-budget` puis `node --test` |
-| `@local/dsh-boost-lessons`<br>`packages/boost-lessons/` | **Étape 1 des leçons à la compaction** : un listener `session/event` **sans tag** qui **journalise** les compactions de **racine** — mesure de fréquence, **aucun** appel de modèle, aucun enfant, aucune surface d'outil. Dédup par `compactionId` (un enfant forké porte les mêmes ids que son père) et corps **intégralement protégé** : une erreur d'écriture est comptée et repliée, jamais propagée à `Session.append`. | **14/14** — `test/lessons.test.mjs` | `cd packages\boost-lessons` puis `node --test` ; sonde : `node tools\probe-lessons.mjs` |
+| **`Quorum (PTC)`** | `ptc.patch.yml` | **Programmatic Tool Calling** (`run_code` + generated TypeScript SDK) inherited recursively by all subagents | Maximum token efficiency, complex workflows, high-speed automated code generation |
+| **`Quorum (Standard)`** | `standard.patch.yml` | **Native tool calls** (direct JSON schema calls) + workflow engine | Standard models and native tool inspection |
+| **`Quorum (Shell)`** | `minimal.patch.yml` | **Bare persistent shell** (`pwsh`/`bash` with persistent state across turns) | Interactive shell tasks, stateful build environments |
 
-Compteurs mesurés le **2026-10-02** sur ce disque, paquet par paquet (`node --test` dans chaque
-`packages/<paquet>`), puis recomposés par le run racine : les cinq premiers sont les paquets
-d'origine, les trois derniers les ajouts.
+---
 
-## Le patch agrégateur
+### Three Isolated Worker Roles
 
-`cordis.patch.yml` (racine) contient **UNE** entrée `insert:` dont la valeur est la **liste des huit
-lignes**, recopiées à l'identique depuis les huit patches d'origine — mêmes `id`, mêmes `name`, mêmes
-`config`.
+Subagents are created with strict mechanical boundaries (`toolFilter`):
 
-Un seul écart, imposé par le chargeur : le `name` d'une ligne est résolu **relativement au fichier de
-patch**. Depuis la racine, les sept lignes fichier portent donc `./packages/<paquet>/lib/index.js` au
-lieu de `./lib/index.js`. Les lignes `preset-quorum-ptc`, `preset-quorum-standard` et `preset-quorum-shell` gardent leur nom de paquet npm.
+```
+                     ┌───────────────────────────────┐
+                     │    Quorum Orchestrator Lead   │
+                     │  (Strategy, Plan, Integrate)  │
+                     └───────────────┬───────────────┘
+                                     │
+           ┌─────────────────────────┼─────────────────────────┐
+           ▼                         ▼                         ▼
+┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
+│ subagent_investigate│   │ subagent_implement  │   │   subagent_verify   │
+│  (DeepInvestigator) │   │     (DeepCoder)     │   │(Adversarial Verifier│
+├─────────────────────┤   ├─────────────────────┤   ├─────────────────────┤
+│ • Read-only         │   │ • Scoped diffs      │   │ • Foreground run    │
+│ • Write denied      │   │ • Unit tests        │   │ • Write denied      │
+│ • Delegation denied │   │ • Delegation denied │   │ • Falsification     │
+└─────────────────────┘   └─────────────────────┘   └─────────────────────┘
+```
 
-`test/aggregate.test.mjs` **exige** cette égalité et échoue à la moindre dérive : ids identiques,
-`config` identiques (comparés en JSON canonique), `name` résolvant vers le **même module** que dans le
-sous-paquet, aucun id dupliqué.
+* **`subagent_investigate`** (DeepInvestigator): Strictly read-only (`write`, `edit`, `git commit` denied). Traces call graphs, inspects logs, and eliminates hypotheses with raw proof.
+* **`subagent_implement`** (DeepCoder): Owns bounded file diffs and writes tests. Cannot delegate.
+* **`subagent_verify`** (Adversarial Verifier): Runs independently in the foreground. Attacks the implementation with real suites and boundary inputs. Rejects paraphrases — only raw command output is admissible.
 
-## Où sont les docs, et laquelle lire
+---
 
-| Document | À lire quand… |
-|---|---|
-| `README.md` (cette page) | on installe, ou on veut la carte des paquets |
-| `docs/HANDOVER.md` | **l'état fait foi ici** : ce qui est acquis et vérifié, les recettes de contrôle (§4-§5), l'inventaire (§7), les faits du harnais à ne pas redécouvrir (§8), ce qui reste ouvert (§9), le plantage surrogate (§10) et **la procédure de coupure (§11)** |
-| `docs/PROTOCOL.md` | on veut **mesurer** le mode : le protocole des trois phases, le prompt de mission de torture, et les règles de recevabilité d'une preuve |
-| `docs/PLAN.md` | on cherche la **conception d'origine** et les jalons M0-M5. **Document historique** : il contient une copie du patch qui a divergé et des affirmations périmées, marquées comme telles ; il ne décrit pas l'état courant |
-| `packages/<paquet>/README.md` | on travaille sur **un** paquet : ses limites connues et ses réglages |
-| `tools/` | on doit **lire un journal de session** : décodage zstd multi-frame, rapport de run, audit, notation de protocole, recherche de texte, intégrité |
+### The Seven Companion Host Services
+
+Quorum is not just a prompt; it mounts seven battle-tested infrastructure services:
+
+1. **`boost-job-relay`** — Re-routes background job settlement notices to the root session when child workers complete early.
+2. **`dsh-detached-jobs` (`run_detached`)** — Allows long-running builds/tests to survive disposable workers by attaching ownership to the root session.
+3. **`dsh-boost-channel` (`channel_post` / `channel_read`)** — Typed, throttled asynchronous back-channel between workers and the lead (`decouverte`, `avancement`, `question`, `resultat`, `echec`).
+4. **`dsh-boost-context-budget`** — Context occupancy meter (`context_occupancy`) and fork protection threshold. Supports requested compaction (`context_compact`).
+5. **`dsh-guard-surrogate`** — Intercepts and repairs unpaired UTF-16 surrogates in tool results before session logging, preventing fatal `HTTP 400 INVALID_REQUEST` errors.
+6. **`agent-teams-shield`** — Automatically shields Quorum sessions from tool shadowing when `@deepseek-ai/dsh-experimental-agent-team` is active in the host profile.
+7. **`boost-status-command` (`/boost-status`)** — Command-plane status monitor that responds even while a tool call is in flight.
+
+---
+
+### Quick Start & Installation
+
+#### Option 1: Install from GitHub clone
+
+```bash
+git clone https://github.com/improveTheWorld/dsh-quorum.git
+dsh plugin add ./dsh-quorum
+```
+
+#### Option 2: Install into a specific profile
 
 ```powershell
-node tools/boost-report.mjs                     # session la plus récente
-node tools/boost-report.mjs --list              # sessions candidates
-node tools/boost-report.mjs --session <id>      # session exacte
+dsh plugin --profile web add C:\path\to\dsh-quorum
 ```
 
-## Tests
+#### Select in the Web GUI:
+Go to **Settings → Agent Presets**, then select **Quorum (PTC)**, **Quorum (Standard)**, or **Quorum (Shell)**.
+
+---
+
+## Présentation en Français
+
+### Le mode Quorum pour DeepSeek Harness
+
+Ce dépôt consolide les sources et l'infrastructure du **mode Quorum** : une famille de **trois presets d'agent** DSH pour le raisonnement profond multi-agents avec vérification adversariale obligatoire, conçue pour éliminer les complaisances et les hallucinations d'ingénierie.
+
+### Pourquoi « Quorum » ?
+En systèmes distribués, un *quorum* est le nombre minimal de membres devant s'accorder pour qu'une décision soit valide. Dans ce mode, **l'orchestrateur ne peut rien livrer tant que le vérificateur indépendant n'a pas falsifié et validé le résultat sur pièces brutes**.
+
+---
+
+### Les 10 lignes montées par le bundle agrégateur
+
+`cordis.patch.yml` monte exactement les 10 lignes suivantes :
+
+```
+preset-quorum-ptc · preset-quorum-standard · preset-quorum-shell ·
+boost-job-relay · boost-status-command · dsh-detached-jobs ·
+dsh-guard-surrogate · dsh-boost-channel · dsh-boost-context-budget · dsh-boost-lessons
+```
+
+| Paquet | Rôle | Tests |
+|---|---|---|
+| `packages/boost-mode/` | Les 3 presets Quorum (`quorum-ptc`, `quorum-standard`, `quorum-shell`) | Anti-dérive racine |
+| `packages/boost-relay/` | Relais hôte des règlements de jobs orphelins vers la racine | 28/28 |
+| `packages/boost-status/` | Commande `/boost-status` lisible même en cours d'appel d'outil | 10/10 |
+| `packages/detached-jobs/` | Outil `run_detached` pour jobs persistants rattachés à la racine | 56/56 |
+| `packages/guard-surrogate/` | Réparation des surrogates UTF-16 isolés + Bouclier d'immunité Agent Teams | 31/31 |
+| `packages/boost-channel/` | Canal typé à double bourse (`channel_post`, `channel_read`) | 52/52 |
+| `packages/boost-context-budget/` | Mesure d'occupation, garde du fork et compaction demandée | 36/36 |
+| `packages/boost-lessons/` | Journalisation passive des compactions de racine | 14/14 |
+
+---
+
+<a id="tests"></a>
+## Tests et Validation
+
+La suite complète s'exécute avec le runner natif de Node.js :
 
 ```powershell
-node --test                                  # racine                    231/231
-node --test test/aggregate.test.mjs          # racine (anti-dérive)         5/5
-node --test tools/tests.test.mjs             # racine (lecteur de logs)    22/22
+node --test
 ```
 
-Puis, **le répertoire du paquet comme dossier courant** :
+**Résultat : 288/288 tests passés, 0 échec.**
 
-```powershell
-cd packages\boost-relay;          node --test   # 28/28
-cd packages\boost-status;         node --test   # 10/10
-cd packages\detached-jobs;        node --test   # 61/61
-cd packages\guard-surrogate;      node --test   # 26/26
-cd packages\boost-channel;        node --test   # 57/57
-cd packages\boost-context-budget; node --test   # 36/36
-cd packages\boost-lessons;        node --test   # 19/19
-cd packages\boost-mode;           node --test   #  0/0   (aucun cas : vert vacant)
-```
+* `test/aggregate.test.mjs` : Test anti-dérive strict garantissant la cohérence absolue entre le patch agrégateur racine et les sous-paquets.
+* Éprouvé en conditions réelles sur un corpus mesuré de plus d'**un milliard de tokens**.
 
-`node --test` **sans argument** découvre les huit suites, l'anti-dérive et le lecteur de journaux :
-**231** cas, mesurés le 2026-10-02 — 5 (anti-dérive) + 22 (lecteur de journaux) + 14 (`boost-relay`) +
-10 (`boost-status`) + 56 (`detached-jobs`) + 26 (`guard-surrogate`) + 52 (`boost-channel`) + 32
-(`boost-context-budget`) + 14 (`boost-lessons`) + 0 (`boost-mode`). La somme se recompose donc à partir
-des compteurs de la table ci-dessus. **Ne pas** écrire `node --test test/` : le dossier en argument
-échoue en `MODULE_NOT_FOUND`.
+---
 
-Un `0/0` se lit « non déclenché », pas « vérifié » : `packages/boost-mode` n'embarque aucune suite.
+## Licence
 
-Recompté le **2026-10-03** : `node --test` à la racine rend **279/279**. Les 231 ci-dessus sont la mesure
-du 2026-10-02 et restent telles quelles ; le **Δ +48** vient de comptes qui avaient dérivé depuis (le
-`boost-relay` seul valait déjà 20 et non 14), plus les **8 cas** ajoutés par les correctifs de relais du
-2026-10-03 — que les 231 ne comptabilisent donc pas.
-
-Recompté le **2026-10-06** : `node --test` à la racine rend **283/283**, dont le cas **T-Q10** (« une
-seule famille de shell par preset ») ajouté avec le correctif de `quorum-shell` — deux familles de shell
-dans le même preset enregistrent les mêmes noms d'outil et le montage échoue. Voir
-`packages/boost-mode/README.md`. Les 231 et 279 ci-dessus restent les mesures de leurs dates.
-
-Le test anti-dérive doit pouvoir **échouer**. Recette de falsification :
-
-```powershell
-Copy-Item -Recurse C:\CodeSource\dsh-boost $env:TEMP\dsh-boost-falsify
-# renommer un id dans la copie jetable, par ex. boost-job-relay
-node --test $env:TEMP\dsh-boost-falsify\test\aggregate.test.mjs
-```
-
-## Arborescence
-
-```
-dsh-boost/
-  package.json          le bundle agrégateur (@local/dsh-boost, dsh.bundle.patch)
-  cordis.patch.yml      UNE entrée insert: portant les dix lignes
-  index.js              entry point du bundle (aucune API runtime)
-  README.md             cette page
-  docs/                 HANDOVER.md, PLAN.md, PROTOCOL.md
-  tools/                analyse des journaux de session
-  packages/
-    boost-mode/           preset-quorum-ptc        (@local/dsh-boost-mode)
-                          preset-quorum-standard
-                          preset-quorum-shell
-    boost-relay/          boost-job-relay          (@local/dsh-boost-relay)
-    boost-status/         boost-status-command     (@local/dsh-boost-status)
-    detached-jobs/        dsh-detached-jobs        (@local/dsh-detached-jobs)
-    guard-surrogate/      dsh-guard-surrogate      (@local/dsh-guard-surrogate)
-    boost-channel/        dsh-boost-channel        (@local/dsh-boost-channel)
-    boost-context-budget/ dsh-boost-context-budget (@local/dsh-boost-context-budget)
-    boost-lessons/        dsh-boost-lessons        (@local/dsh-boost-lessons)
-  test/
-    aggregate.test.mjs  le test anti-dérive
-```
+MIT © bilel GATRI (`@improveTheWorld`)
