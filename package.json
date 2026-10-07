@@ -2,7 +2,7 @@
   "name": "@local/dsh-boost",
   "version": "0.1.0",
   "private": true,
-  "description": "Aggregate Boost bundle: one installable package that mounts the eight Boost lines (agent preset, job relay, /boost-status command, run_detached, surrogate guard, return channel, context budget, compaction lessons) from a single cordis.patch.yml.",
+  "description": "Quorum mode bundle for DeepSeek Harness: multi-agent deep reasoning with role-isolated subagents, adversarial verification, persistent return channel, and context budget management.",
   "type": "module",
   "license": "MIT",
   "main": "index.js",
@@ -14,7 +14,8 @@
     "index.js",
     "cordis.patch.yml",
     "README.md",
-    "docs/"
+    "docs/",
+    "packages/"
   ],
   "dsh": {
     "bundle": {

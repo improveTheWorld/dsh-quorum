@@ -6,6 +6,14 @@
 #   preset-quorum-standard  base = dsh-web-app/presets/standard.patch.yml
 #   preset-quorum-shell     base = dsh-web-app/presets/minimal.patch.yml
 #
+# LA SEULE EXCEPTION A LA QUEUE : `quorum-shell` ne porte PAS les deux lignes
+# de shell one-shot (`tool-bash`, `tool-pwsh`). Sa base fournit deja la famille
+# persistante (`persistent-bash`, `persistent-pwsh`) et les deux familles
+# enregistrent les MEMES noms d outil (`bash`, `pwsh`) dans la meme portee : les
+# monter ensemble fait echouer le montage de `persistent-pwsh` (« tool "pwsh" is
+# already registered in this scope », mesure au roster le 2026-10-06) et le
+# preset refuse alors TOUTE session. T-Q10 borne l invariant.
+#
 # WHY THREE EXPLICIT ROWS, NOT ONE OVERRIDE: a preset row's `config` is replaced
 # wholesale, never deep-merged (`dsh-app-boot/lib/index.js:104-107`). A row
 # cannot "extend" `preset-ptc`; it must restate the whole `plugins` list. The
@@ -16,7 +24,8 @@
 # WHAT THE QUEUE IS: the rows that turn a harness base into a quorum preset —
 # the orchestrator persona with its long prompt, `agent-instructions`, the whole
 # tool stack, and the three role-isolated delegation tools. It is the SAME queue
-# in all three rows. The rows a base contributes OUTSIDE the queue stay verbatim:
+# in all three rows, save the exception above. The rows a base contributes
+# OUTSIDE the queue stay verbatim:
 # `quorum-ptc` keeps the ptc presentation, `quorum-standard` keeps the standard
 # base's enabled workflow rows and its codex / claude-code rows (T-Q4).
 #
@@ -976,12 +985,18 @@
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
               maxBytes: 65536
-          - id: tool-bash
-            name: '@deepseek-ai/dsh-tool-bash'
-            disabled: !!js process.platform === 'win32'
-          - id: tool-pwsh
-            name: '@deepseek-ai/dsh-tool-pwsh'
-            disabled: !!js process.platform !== 'win32'
+          # ---------------------------------------------------------------- #
+          # PAS de shell one-shot ici : la base en fournit deja une famille  #
+          # ---------------------------------------------------------------- #
+          # `persistent-bash` / `persistent-pwsh` (groupe `persistent-shell`
+          # ci-dessus) enregistrent les outils NOMMES `bash` / `pwsh` dans la
+          # portee du preset — les noms exacts que `@deepseek-ai/dsh-tool-bash`
+          # et `@deepseek-ai/dsh-tool-pwsh` enregistrent. Monter les DEUX
+          # familles fait ECHOUER le montage de `persistent-pwsh` : mesure au
+          # roster du 2026-10-06, « tool "pwsh" is already registered in this
+          # scope », et quorum-shell refusait toute session. Une seule famille
+          # de shell par preset (T-Q10) ; ici c est celle de la base, la seule
+          # chose qui subsiste de `minimal.patch.yml`.
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
           - id: tool-fs-search

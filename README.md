@@ -1,6 +1,6 @@
 # dsh-boost — le bundle agrégateur du mode Quorum
 
-**Le mode Quorum** est une famille de **trois** presets d'agent DSH pour le raisonnement profond multi-agents : un orchestrateur décompose la demande, délègue à des sous-agents **isolés par rôle** (`subagent_investigate`, `subagent_implement`, `subagent_verify`) et ne livre rien avant qu'un vérificateur indépendant ait essayé de falsifier le résultat. Les trois presets ne diffèrent que par la **présentation des outils** : `preset-quorum-ptc` en **PTC** (*Programmatic Tool Calling* : l'agent écrit un programme TypeScript qui appelle les outils), `preset-quorum-standard` en appels d'outils **natifs**, `preset-quorum-shell` sur le **socle nu**. Le mode s'ajoute aux presets livrés (`standard`,
+**Le mode Quorum** est une famille de **trois** presets d'agent DSH pour le raisonnement profond multi-agents : un orchestrateur décompose la demande, délègue à des sous-agents **isolés par rôle** (`subagent_investigate`, `subagent_implement`, `subagent_verify`) et ne livre rien avant qu'un vérificateur indépendant ait essayé de falsifier le résultat. Les trois presets ne diffèrent que par la **base livrée** qu'ils reprennent — la **présentation des outils** : `preset-quorum-ptc` en **PTC** (*Programmatic Tool Calling* : l'agent écrit un programme TypeScript qui appelle les outils), `preset-quorum-standard` en appels d'outils **natifs**, `preset-quorum-shell` sur le **socle nu** avec son **shell persistant**. Le mode s'ajoute aux presets livrés (`standard`,
 `ptc`, `minimal`, `cordis`) et se choisit dans *Settings → Agent Presets*.
 
 Ce dépôt **consolide les sources et la documentation du mode Quorum** en un seul endroit, et publie
@@ -186,6 +186,11 @@ Recompté le **2026-10-03** : `node --test` à la racine rend **279/279**. Les 2
 du 2026-10-02 et restent telles quelles ; le **Δ +48** vient de comptes qui avaient dérivé depuis (le
 `boost-relay` seul valait déjà 20 et non 14), plus les **8 cas** ajoutés par les correctifs de relais du
 2026-10-03 — que les 231 ne comptabilisent donc pas.
+
+Recompté le **2026-10-06** : `node --test` à la racine rend **283/283**, dont le cas **T-Q10** (« une
+seule famille de shell par preset ») ajouté avec le correctif de `quorum-shell` — deux familles de shell
+dans le même preset enregistrent les mêmes noms d'outil et le montage échoue. Voir
+`packages/boost-mode/README.md`. Les 231 et 279 ci-dessus restent les mesures de leurs dates.
 
 Le test anti-dérive doit pouvoir **échouer**. Recette de falsification :
 

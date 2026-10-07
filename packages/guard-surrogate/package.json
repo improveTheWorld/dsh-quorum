@@ -9,6 +9,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./walker": "./lib/walker.js",
+    "./agent-teams-shield": "./lib/agent-teams-shield.js",
     "./package.json": "./package.json"
   },
   "files": [

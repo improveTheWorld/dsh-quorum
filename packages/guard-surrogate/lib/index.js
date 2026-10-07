@@ -44,6 +44,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { repairContent, textLength } from './walker.js'
+import { isQuorumAgent, shieldAgentTeams } from './agent-teams-shield.js'
 
 /** Cordis companion plugin name. */
 const name = 'guard-surrogate'
@@ -229,6 +230,9 @@ export function apply(ctx, config = {}) {
       return decision
     }
   }, { prepend: true })
+
+  // Shield Quorum sessions from Agent Teams tool usurpation if agentTeams is present
+  shieldAgentTeams(ctx)
 }
 
-export { name }
+export { isQuorumAgent, name, shieldAgentTeams }

@@ -51,7 +51,9 @@ const PACKAGES = ['boost-mode', 'boost-relay', 'boost-status', 'detached-jobs', 
  * queue; a preset's `config` is replaced wholesale and never deep-merged
  * (`dsh-app-boot/lib/index.js:104-107`), so the queue is duplicated verbatim in
  * the three lists. T-Q2 bounds that duplication, except for the persona, whose
- * head is per tool mode (T-P1) and whose body is shared (T-P2).
+ * head is per tool mode (T-P1) and whose body is shared (T-P2), and except for
+ * the two one-shot shell rows that `quorum-shell` must NOT carry (T-Q10: both
+ * shell families register the same tool names).
  */
 const QUORUM_PRESETS = [
   { rowId: 'preset-quorum-ptc', presetId: 'quorum-ptc', baseFile: 'ptc.patch.yml', basePreset: 'preset-ptc' },
@@ -390,17 +392,76 @@ test('T-Q1 — the three preset rows exist, with the three exact ids, and each m
  */
 const QUORUM_QUEUE_UNIFORM = QUORUM_QUEUE.filter((id) => id !== 'persona' && !ROLE_IDS.includes(id))
 
-test('T-Q2 — the quorum queue is identical in the three presets, persona excluded', () => {
+/**
+ * The ONE bounded exception to the shared queue: the two one-shot shell rows,
+ * dropped from `quorum-shell` alone.
+ *
+ * Measured defect it repairs (live agent-preset roster, 2026-10-06):
+ *
+ *   quorum-shell -> broken: persistent-pwsh (@deepseek-ai/dsh-tool-pwsh-persistent):
+ *   tool "pwsh" is already registered in this scope
+ *
+ * The minimal base supplies a PERSISTENT shell family (`persistent-bash`,
+ * `persistent-pwsh`), and the queue supplied the one-shot family
+ * (`@deepseek-ai/dsh-tool-bash`, `@deepseek-ai/dsh-tool-pwsh`). Both register the
+ * SAME model-facing tool names — `bash` and `pwsh` — in the same preset scope, so
+ * the second registration killed the mount and `quorum-shell` refused every
+ * session. `quorum-shell` keeps the base's family: the persistent shell is all
+ * that survives of `minimal.patch.yml`, so it is that preset's identity. T-Q10
+ * states the invariant behind the exception and pins the DIRECTION of the fix,
+ * so "delete both families" cannot pass either.
+ */
+const QUORUM_SHELL_ONE_SHOT_SHELL = ['tool-bash', 'tool-pwsh']
+
+/** Stands in for a dropped row, so T-Q2 still compares lists of equal length. */
+const DROPPED_ONE_SHOT_SHELL = 'absent: the shell base owns the only shell family'
+
+test('T-Q2 — the quorum queue is identical in the three presets, persona and shell family excluded', () => {
   const queues = QUORUM_PRESETS.map((preset) => {
     const index = flattenPlugins(quorumById.get(preset.rowId).config.plugins, preset.rowId)
+    const dropped = preset.presetId === 'quorum-shell'
     return QUORUM_QUEUE_UNIFORM.map((id) => {
+      if (dropped && QUORUM_SHELL_ONE_SHOT_SHELL.includes(id)) {
+        assert.equal(index.get(id), undefined, preset.rowId + ': "' + id + '" must be ABSENT — its tool name collides with the persistent shell of its base (T-Q10)')
+        return id + ' = ' + DROPPED_ONE_SHOT_SHELL
+      }
       const row = index.get(id)
       assert.ok(row, preset.rowId + ': the queue must declare "' + id + '"')
       return id + ' = ' + canonical(row)
     })
   })
   assert.deepEqual(queues[0], queues[1], 'the quorum queue diverged between quorum-ptc and quorum-standard')
-  assert.deepEqual(queues[0], queues[2], 'the quorum queue diverged between quorum-ptc and quorum-shell')
+  const expectedShell = queues[0].map((line) => {
+    const id = line.slice(0, line.indexOf(' = '))
+    return QUORUM_SHELL_ONE_SHOT_SHELL.includes(id) ? id + ' = ' + DROPPED_ONE_SHOT_SHELL : line
+  })
+  assert.deepEqual(queues[2], expectedShell, 'the quorum queue diverged between quorum-ptc and quorum-shell outside the documented shell-family exception')
+})
+
+test('T-Q10 — one shell family per preset: the two families collide by TOOL NAME', () => {
+  const ONE_SHOT = ['@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-pwsh']
+  const PERSISTENT = ['@deepseek-ai/dsh-tool-bash-persistent', '@deepseek-ai/dsh-tool-pwsh-persistent']
+  for (const preset of QUORUM_PRESETS) {
+    const rows = [...flattenPlugins(quorumById.get(preset.rowId).config.plugins, preset.rowId).values()]
+    // A `!!js` disabled is a PLATFORM condition, not a disable: the collision
+    // happens on both platforms (bash on POSIX, pwsh on Windows).
+    const enabled = rows.filter((row) => row.disabled !== true)
+    const oneShot = enabled.filter((row) => ONE_SHOT.includes(row.name))
+    const persistent = enabled.filter((row) => PERSISTENT.includes(row.name))
+    assert.ok(
+      oneShot.length === 0 || persistent.length === 0,
+      preset.rowId +
+        ' mounts BOTH shell families (' +
+        [...oneShot, ...persistent].map((row) => row.id).join(', ') +
+        "): the one-shot family and its -persistent twin register the SAME tool names (bash / pwsh) in the same preset scope, so the second one cannot mount"
+    )
+  }
+  const shellRows = flattenPlugins(quorumById.get('preset-quorum-shell').config.plugins, 'preset-quorum-shell')
+  for (const id of QUORUM_SHELL_ONE_SHOT_SHELL) {
+    assert.equal(shellRows.get(id), undefined, 'quorum-shell must not declare "' + id + '"')
+  }
+  assert.equal(shellRows.get('persistent-bash')?.name, '@deepseek-ai/dsh-tool-bash-persistent', 'quorum-shell must keep the persistent bash of its base')
+  assert.equal(shellRows.get('persistent-pwsh')?.name, '@deepseek-ai/dsh-tool-pwsh-persistent', 'quorum-shell must keep the persistent pwsh of its base')
 })
 
 // ---------------------------------------------------------------------------

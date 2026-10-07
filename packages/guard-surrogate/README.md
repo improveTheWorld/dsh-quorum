@@ -226,3 +226,26 @@ Ecrit sans minimiser. Ces points sont des limites assumees, pas des details.
 - Le rafraichissement a chaud de l'interrupteur par le loader : le schema est
   verifie `volatile` et la reference vivante est verifiee lisible, mais le
   `_commitVolatile` complet n'a pas ete execute.
+
+## Bouclier d'immunite Agent Teams (`agent-teams-shield.js`)
+
+En plus de la reparation des surrogates, ce paquet embarque l'immunisation contre
+le masquage d'outils cause par `@deepseek-ai/dsh-experimental-agent-team`.
+
+- **Le probleme** : Dans un environnement ou Agent Teams est active au niveau Host,
+  `tool-agent-team` traite abusivement toute session racine Quorum comme un « Team Lead »
+  (`tryMembership()` renvoie `{ role: 'lead' }`) et injecte ses outils
+  (`send_message`, `list_agents`, `interrupt_agent`) dans la portee privee de l'agent.
+  Leurs signatures incompatibles (`target` au lieu d'`agent_id`) masquent les outils
+  de `tool-subagent-control` et cassent le protocole de delegation de Quorum.
+- **Le mecanisme** :
+  1. `shieldAgentTeams(ctx)` intercepte reactivement `ctx.agentTeams` s'il est present
+     (`ctx.inject(['agentTeams'], ...)`). S'il est absent, le module est 100 % inerte.
+  2. Il enveloppe `tryMembership` sur le service et son `roster` pour renvoyer `undefined`
+     pour tout agent tournant sous un preset Quorum (`quorum-*` ou `boost`). Agent Teams
+     n'injecte alors aucun outil dans les sessions Quorum.
+  3. Deuxieme ligne de defense : sur `agent/created`, toute presence d'outils d'equipe
+     (`spawn_teammate`, `wait_agent`, `team_task_*`) est restreinte de la portee Quorum.
+  4. Les sessions non-Quorum (ex: standard) conservent le fonctionnement normal d'Agent Teams.
+- **Verification** : 5 cas unitaires dans `test/agent-teams-shield.test.mjs`, et validation
+  reelle sur un hote DSH montant simultanement les deux bundles.

@@ -946,12 +946,18 @@
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
               maxBytes: 65536
-          - id: tool-bash
-            name: '@deepseek-ai/dsh-tool-bash'
-            disabled: !!js process.platform === 'win32'
-          - id: tool-pwsh
-            name: '@deepseek-ai/dsh-tool-pwsh'
-            disabled: !!js process.platform !== 'win32'
+          # ---------------------------------------------------------------- #
+          # PAS de shell one-shot ici : la base en fournit deja une famille  #
+          # ---------------------------------------------------------------- #
+          # `persistent-bash` / `persistent-pwsh` (groupe `persistent-shell`
+          # ci-dessus) enregistrent les outils NOMMES `bash` / `pwsh` dans la
+          # portee du preset — les noms exacts que `@deepseek-ai/dsh-tool-bash`
+          # et `@deepseek-ai/dsh-tool-pwsh` enregistrent. Monter les DEUX
+          # familles fait ECHOUER le montage de `persistent-pwsh` : mesure au
+          # roster du 2026-10-06, « tool "pwsh" is already registered in this
+          # scope », et quorum-shell refusait toute session. Une seule famille
+          # de shell par preset (T-Q10) ; ici c est celle de la base, la seule
+          # chose qui subsiste de `minimal.patch.yml`.
           - id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
           - id: tool-fs-search

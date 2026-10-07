@@ -9,7 +9,7 @@ leurs mesures dans `DECISIONS.md`.
 ## 1. En une ligne
 
 `C:\CodeSource\dsh-boost` est le depot consolide du mode Quorum : **dix lignes** montees par un seul
-bundle installable. Le profil `web` pointe dessus. Etat : **268 cas a la racine, 0 echec**, arbre propre
+bundle installable. Le profil `web` pointe dessus. Etat : **283 cas a la racine, 0 echec**, arbre propre
 (`git log -1` pour le HEAD — un compte ecrit ici perime a chaque commit).
 
 ```
@@ -65,7 +65,7 @@ README.md:117,171   et   docs/HANDOVER.md:276   annoncent encore 32/32 pour boos
 
 ```
 les dix lignes montees, 0 avertissement        dsh --profile web --dump-config
-268 cas a la racine, 0 echec                     node --test  (le run racine COLLECTE les paquets)
+283 cas a la racine, 0 echec                     node --test  (le run racine COLLECTE les paquets)
 CINQ sondes vertes                              probe-stop · probe-mount · probe-fork-guard · probe-lessons
                                                 · probe-owner-gate
 le canal, en service                             3 usages reels ; bornes exercees (2 livres / 5 throttles)

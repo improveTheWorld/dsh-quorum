@@ -8,14 +8,25 @@ sur une des trois bases livrées :
 |---|---|---|
 | `quorum-ptc` | `ptc.patch.yml` | La présentation PTC (`run_code` + SDK généré) pour l'orchestrateur et ses enfants |
 | `quorum-standard` | `standard.patch.yml` | La présentation native, les lignes `workflow` actives, `codex` / `claude-code` |
-| `quorum-shell` | `minimal.patch.yml` | Un shell persistant nu — **pas** minimal en outils ni en taille de contexte |
+| `quorum-shell` | `minimal.patch.yml` | Le **shell persistant** de la base — seule famille de shell du preset — **pas** minimal en outils ni en taille de contexte |
 
 La queue quorum (persona orchestrateur, `agent-instructions`, pile d'outils, trois rôles) est
-**identique dans les trois**, à une exception près : les **quatre personas** — l'orchestrateur et les
-trois rôles — ont chacune une **tête par mode** (PTC ou natif) et un **corps commun**.
-`test/aggregate.test.mjs` borne l'invariant — T-Q2 pour le reste de la queue, T-P1 pour la tête de
-l'orchestrateur, T-P2 pour son corps, T-P4/T-P5/T-P6 pour la tête, le corps et le marqueur des trois
-rôles.
+**identique dans les trois**, à **deux** exceptions près, chacune bornée par un test :
+
+- les **quatre personas** — l'orchestrateur et les trois rôles — ont chacune une **tête par mode**
+  (PTC ou natif) et un **corps commun** : T-P1 et T-P2 pour l'orchestrateur, T-P4/T-P5/T-P6 pour les
+  rôles ;
+- `quorum-shell` **ne porte pas** les deux lignes de shell *one-shot* de la queue (`tool-bash`,
+  `tool-pwsh`). Sa base fournit la famille **persistante** (`persistent-bash`, `persistent-pwsh`) et
+  les deux familles enregistrent les **mêmes noms d'outil** (`bash`, `pwsh`) dans la même portée du
+  preset : les monter ensemble fait **échouer le montage** de `persistent-pwsh`. Mesuré le
+  2026-10-06 au roster vivant — `tool "pwsh" is already registered in this scope` — et `quorum-shell`
+  refusait alors **toute** session. T-Q10 pin l'invariant (« une seule famille de shell par preset »)
+  et le **sens** du correctif : le shell persistant, seule chose qui subsiste de `minimal.patch.yml`,
+  ne doit pas disparaître non plus.
+
+`test/aggregate.test.mjs` borne les deux invariants — T-Q2 pour le reste de la queue, les T-P pour les
+personas.
 
 ## Ce que fait le mode
 
@@ -55,7 +66,7 @@ DSH rendent l'héritage gratuit :
 Conséquence, pour `quorum-ptc` : l'orchestrateur et tous ses sous-agents voient `run_code` + le SDK
 TypeScript généré, et aucun schéma d'outil natif. Ajouter un rôle coûte donc très peu de catalogue.
 `quorum-standard` et `quorum-shell`, sans ligne de présentation, gardent les schémas d'outils natifs
-de leur base. La queue quorum y est la même à une exception près : les **quatre personas** (celle de
+de leur base. La queue quorum y est la même à **deux** exceptions près : les **quatre personas** (celle de
 l'orchestrateur et celles des trois rôles) portent une **tête par mode** — les paragraphes PTC et leurs
 notes n'existent que dans `quorum-ptc`, les deux presets natifs reçoivent l'équivalent natif (appels
 directs, schémas dans l'API et non dans le prompt, arguments JSON seuls), puis un corps commun
@@ -162,7 +173,8 @@ node tools/diagnose-frames.mjs <fichier.zstd>  # framing : nombre de frames, tai
 ## Fichiers
 
 - `cordis.patch.yml` — les trois déclarations `preset-quorum-*` (compositions complètes ; la queue
-  quorum y est recopiée à l'identique, T-Q2 la borne).
+  quorum y est recopiée à l'identique, T-Q2 la borne, moins les deux lignes de shell *one-shot* que
+  `quorum-shell` ne peut pas porter — T-Q10).
 - `lib/index.js` — volontairement vide ; ce bundle ne publie aucune API runtime.
 - `README.md` — cette page.
 
